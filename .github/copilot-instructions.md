@@ -56,6 +56,34 @@ Branch naming: `feat/`, `fix/`, `docs/`, `chore/`, `refactor/`
 - 1 approving review required; stale reviews are dismissed
 - Update the README CLI Flags or Keyboard Shortcuts tables when changing flags or key bindings
 
+### Charset / encoding when writing any GitHub Markdown body
+
+This rule applies to **all** `gh` calls that include Markdown body text: PR creation, PR comments, review replies, and any `gh api` call with a `body` field.
+
+Always write body text to a temp file using a **single-quoted PowerShell here-string** (`@'` … `'@`) and pass it via `--body-file` or `--input`. Never put Markdown body text inline in a double-quoted PowerShell string or `--body "..."`.
+
+**Why:** In PowerShell double-quoted strings, the backtick (`` ` ``) is the escape character. Any backtick used for Markdown code formatting is silently corrupted:
+- `` `e `` → ESC control character, shown as `^[`
+- `` `f `` → form feed, splits the word
+- `` `a `` → BEL character, the `a` is dropped
+- Any other `` `x `` → backtick is dropped, leaving just `x`
+
+**The correct pattern:**
+
+```powershell
+$body = @'
+## Description
+Changes to `config.py` are not required.
+'@
+
+$tmp = [System.IO.Path]::GetTempFileName()
+[System.IO.File]::WriteAllText($tmp, $body, [System.Text.UTF8Encoding]::new($false))
+gh pr create --body-file $tmp --title "..." --head <branch>
+Remove-Item $tmp
+```
+
+The explicit `UTF8Encoding($false)` (no BOM) avoids a second class of corruption where GitHub's API receives a UTF-8 BOM as visible content.
+
 ## Running locally
 
 ```bash
