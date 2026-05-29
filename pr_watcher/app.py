@@ -189,27 +189,37 @@ class PRWatcherApp(App):
         return self._col_keys.get("title")
 
     def _compute_col_widths(self) -> dict[str, int]:
-        """Measure actual content widths and allocate remaining space to Title."""
-        mins  = {"number": 2,  "repo": 10, "title": 10, "author": 6, "review": 8,  "age": 3, "labels": 0}
-        maxes = {"number": 7,  "repo": 30, "title": 999,"author": 20,"review": 16, "age": 5, "labels": 30}
+        """Measure actual content widths; title is capped at content, labels gets the excess."""
+        mins  = {"number": 2,  "repo": 10, "title": 10, "author": 6, "review": 8, "age": 3, "labels": 0}
+        maxes = {"number": 7,  "repo": 30, "title": 999,"author": 20,"review": 16, "age": 5, "labels": 40}
 
         w = dict(mins)
         for pr in self._prs:
             w["number"] = max(w["number"], len(f"#{pr['number']}"))
             w["repo"]   = max(w["repo"],   len(repo_short_name(pr.get("repository", ""))))
+            w["title"]  = max(w["title"],  len(pr.get("title", "")))
             w["author"] = max(w["author"], len(pr.get("author", {}).get("login", "")))
             w["review"] = max(w["review"], len(format_review_status(pr)))
             w["age"]    = max(w["age"],    len(format_age(pr.get("createdAt", ""))))
             w["labels"] = max(w["labels"], len(format_labels(pr.get("labels", []))))
 
-        # Apply caps to every column except title
-        for k in ("number", "repo", "author", "review", "age", "labels"):
-            w[k] = min(w[k], maxes[k])
+        # Apply caps to all columns
+        for k in mins:
+            w[k] = max(mins[k], min(w[k], maxes[k]))
 
-        # Title gets whatever terminal width remains
-        SEPARATORS = 7  # 6 inter-column gaps + 1 left pad
-        fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age", "labels"))
-        w["title"] = max(mins["title"], self.size.width - fixed - SEPARATORS)
+        # Truly fixed columns: number, repo, author, review, age
+        SEPARATORS = 6  # one space between each of the 7 columns
+        fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age"))
+        remaining = max(mins["title"] + mins["labels"], self.size.width - fixed - SEPARATORS)
+
+        # Title takes only what its content needs; labels gets whatever is left (up to its cap)
+        title_w  = max(mins["title"],  min(w["title"],  remaining - mins["labels"]))
+        labels_w = max(mins["labels"], min(remaining - title_w, maxes["labels"]))
+        # If labels hit its cap and space remains, let title grow back into it
+        title_w  = max(title_w, remaining - labels_w)
+
+        w["title"]  = title_w
+        w["labels"] = labels_w
         return w
 
     def _apply_col_widths(self, widths: dict[str, int]) -> None:
@@ -239,7 +249,7 @@ class PRWatcherApp(App):
         yield Static(self._header_text(), id="app-header")
         yield LoadingIndicator(id="loading")
         yield Static("", id="error-panel")
-        yield DataTable(id="pr-table", cursor_type="row", zebra_stripes=True)
+        yield DataTable(id="pr-table", cursor_type="row", zebra_stripes=True, show_row_labels=False)
         yield Static("Starting…", id="status-bar")
         yield Footer()
 
