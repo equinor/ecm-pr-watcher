@@ -128,6 +128,21 @@ def repo_short_name(full_name: str) -> str:
     return parts[1] if len(parts) == 2 else full_name
 
 
+def ellipsis_middle(s: str, width: int) -> str:
+    """Truncate a string to `width` chars using a middle ellipsis.
+
+    Preserves both the start and the end of the string so suffixes like
+    '-iac' remain visible. E.g. 'ecm-iso-wp-gl0560-api-iac' → 'ecm-iso…-iac'
+    """
+    if len(s) <= width:
+        return s
+    # Reserve 1 char for the ellipsis; split remaining budget ~60/40 favouring the start
+    budget = width - 1
+    tail = budget // 3
+    head = budget - tail
+    return f"{s[:head]}…{s[len(s) - tail:]}"
+
+
 def open_url(url: str) -> None:
     """Open a URL in the default system browser, cross-platform."""
     try:
@@ -307,7 +322,7 @@ class PRWatcherApp(App):
         for pr in self._prs:
             table.add_row(
                 f"#{pr['number']}",
-                repo_short_name(pr.get("repository", "")),
+                ellipsis_middle(repo_short_name(pr.get("repository", "")), 22),
                 pr.get("title", ""),
                 pr.get("author", {}).get("login", ""),
                 format_review_status(pr),
