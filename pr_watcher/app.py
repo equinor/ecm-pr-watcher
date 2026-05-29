@@ -26,6 +26,7 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.events import Resize
 from textual.widgets import DataTable, Footer, LoadingIndicator, Static
 from textual import work
 from textual.worker import Worker, WorkerState
@@ -248,7 +249,7 @@ class PRWatcherApp(App):
             return
         self._apply_col_widths(self._compute_col_widths(terminal_width=terminal_width))
 
-    def on_resize(self, event) -> None:
+    def on_resize(self, event: Resize) -> None:
         self._update_title_col_width(terminal_width=event.size.width)
 
     # ------------------------------------------------------------------
