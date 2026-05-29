@@ -182,9 +182,12 @@ class PRWatcherApp(App):
         self._error: Optional[str] = None
         self._last_updated: Optional[datetime] = None
         self._next_refresh: Optional[datetime] = None
+        self._title_col_key = None  # set in on_mount; guard on_resize from firing first
 
     def _update_title_col_width(self) -> None:
         """Recalculate the Title column width to fill available terminal width."""
+        if self._title_col_key is None:
+            return
         # Sum of all fixed columns + 1-char separator between each of the 7 columns
         # DataTable also adds 1 cell of left padding.
         FIXED_COLS = 7 + 22 + 15 + 16 + 5 + 22   # all except Title
@@ -193,7 +196,9 @@ class PRWatcherApp(App):
         new_width = max(MIN_TITLE, self.size.width - FIXED_COLS - SEPARATORS)
         table = self.query_one("#pr-table", DataTable)
         table.columns[self._title_col_key].width = new_width
-        table.refresh()
+        # Signal DataTable to recalculate layout on next idle cycle
+        table._require_update_dimensions = True
+        table.check_idle()
 
     def on_resize(self) -> None:
         self._update_title_col_width()
