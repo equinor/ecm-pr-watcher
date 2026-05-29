@@ -9,6 +9,13 @@ A terminal-based (TUI) dashboard for monitoring open Pull Requests across all re
 ## Prerequisites
 
 - **Python 3.10+**
+
+  > **Windows:** The easiest way to install Python is via the Microsoft Store:
+  > ```
+  > winget install Python.Python.3.12
+  > ```
+  > Or download the installer from [python.org](https://www.python.org/downloads/). Make sure to check **"Add Python to PATH"** during installation, then restart your terminal.
+
 - **GitHub CLI (`gh`)** — [install here](https://cli.github.com/) and authenticated via `gh auth login`
 - Access to the target GitHub organisation and team
 
