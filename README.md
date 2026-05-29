@@ -4,23 +4,7 @@ A terminal-based (TUI) dashboard for monitoring open Pull Requests across all re
 
 ## Screenshot
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  🔍 PR Watcher  |  Org: Equinor  |  Team: ECM WO Preparation  |  Refresh: every 60s  │
-├─────────────────────────────────────────────────────────────────────────┤
-│  #      Repository             Title                   Author  Review Status   Age  Labels  │
-│  ────  ──────────────────────  ──────────────────────  ──────  ──────────────  ───  ──────  │
-│ ► #42  ecm-wo-prep             feat: add widget        alice   ✓ Approved       2d          │
-│   #41  ecm-api-backend         fix: null check         bob     ⏳ Review Needed  5d  bug    │
-│   #38  ecm-react-frontend      chore: update deps      carol   ◌ Draft          1w          │
-├─────────────────────────────────────────────────────────────────────────┤
-│  📋 3 open PRs  │  Updated 14:23:01  │  Refresh in 45s                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│  q quit   r refresh   Enter open in browser                             │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-> **Screenshot placeholder** — replace with an actual terminal screenshot once running.
+![ecm-pr-watcher in action](docs/screenshot.png)
 
 ## Prerequisites
 
