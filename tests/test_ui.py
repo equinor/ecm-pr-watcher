@@ -14,6 +14,7 @@ Root cause guarded against:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -62,60 +63,55 @@ MOCK_PRS = [
 ]
 
 
-async def _load_mock_data(app: PRWatcherApp, pilot) -> None:
-    """Inject mock PRs directly so we never call the real gh CLI."""
-    app._prs = MOCK_PRS
-    app._rebuild_table()
-    app._set_view("table")
-    await pilot.pause()
+async def _run_with_mock_prs(app: PRWatcherApp, pilot) -> None:
+    """Wait for the worker (which returns MOCK_PRS) to populate the table."""
+    # Give the background thread time to complete and the UI to update.
+    await pilot.pause(0.5)
 
 
 async def test_no_horizontal_scroll():
     """After loading mock PRs, virtual width must not exceed table width."""
     config = Config(org="Equinor")
     app = PRWatcherApp(config)
-    async with app.run_test(size=(220, 40)) as pilot:
-        await _load_mock_data(app, pilot)
-        table = app.query_one("#pr-table")
-        assert table.virtual_size.width <= table.size.width, (
-            f"Horizontal overflow: virtual={table.virtual_size.width}, "
-            f"visible={table.size.width}, "
-            f"delta={table.virtual_size.width - table.size.width}"
-        )
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table")
+            assert table.virtual_size.width <= table.size.width, (
+                f"Horizontal overflow: virtual={table.virtual_size.width}, "
+                f"visible={table.size.width}, "
+                f"delta={table.virtual_size.width - table.size.width}"
+            )
 
 
 async def test_no_horizontal_scroll_narrow_terminal():
     """Column widths adapt correctly on a narrower (120-column) terminal."""
     config = Config(org="Equinor")
     app = PRWatcherApp(config)
-    async with app.run_test(size=(120, 30)) as pilot:
-        await _load_mock_data(app, pilot)
-        table = app.query_one("#pr-table")
-        assert table.virtual_size.width <= table.size.width, (
-            f"Horizontal overflow at 120 cols: virtual={table.virtual_size.width}, "
-            f"visible={table.size.width}"
-        )
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table")
+            assert table.virtual_size.width <= table.size.width, (
+                f"Horizontal overflow at 120 cols: virtual={table.virtual_size.width}, "
+                f"visible={table.size.width}"
+            )
 
 
 async def test_no_horizontal_scroll_after_resize():
-    """Column widths adapt correctly after terminal resize.
-
-    We simulate resize by starting at 220, resizing to 160, and explicitly
-    re-triggering column-width recomputation (mirrors what on_resize does).
-    """
+    """Column widths adapt correctly after terminal resize."""
     config = Config(org="Equinor")
     app = PRWatcherApp(config)
-    async with app.run_test(size=(220, 40)) as pilot:
-        await _load_mock_data(app, pilot)
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
 
-        # Resize the headless terminal to a narrower width.
-        await pilot.resize_terminal(160, 40)
-        # Ensure on_resize has fired and _update_dimensions has run.
-        await pilot.pause()
-        await pilot.pause()
+            await pilot.resize_terminal(160, 40)
+            await pilot.pause(0.2)
 
-        table = app.query_one("#pr-table")
-        assert table.virtual_size.width <= table.size.width, (
-            f"Horizontal overflow after resize to 160: virtual={table.virtual_size.width}, "
-            f"visible={table.size.width}"
-        )
+            table = app.query_one("#pr-table")
+            assert table.virtual_size.width <= table.size.width, (
+                f"Horizontal overflow after resize to 160: virtual={table.virtual_size.width}, "
+                f"visible={table.size.width}"
+            )
+
