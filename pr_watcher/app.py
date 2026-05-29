@@ -183,6 +183,21 @@ class PRWatcherApp(App):
         self._last_updated: Optional[datetime] = None
         self._next_refresh: Optional[datetime] = None
 
+    def _update_title_col_width(self) -> None:
+        """Recalculate the Title column width to fill available terminal width."""
+        # Sum of all fixed columns + 1-char separator between each of the 7 columns
+        # DataTable also adds 1 cell of left padding.
+        FIXED_COLS = 7 + 22 + 15 + 16 + 5 + 22   # all except Title
+        SEPARATORS = 7                              # 6 inter-column + 1 left pad
+        MIN_TITLE = 10
+        new_width = max(MIN_TITLE, self.size.width - FIXED_COLS - SEPARATORS)
+        table = self.query_one("#pr-table", DataTable)
+        table.columns[self._title_col_key].width = new_width
+        table.refresh()
+
+    def on_resize(self) -> None:
+        self._update_title_col_width()
+
     # ------------------------------------------------------------------
     # Compose + mount
     # ------------------------------------------------------------------
@@ -199,11 +214,14 @@ class PRWatcherApp(App):
         table = self.query_one("#pr-table", DataTable)
         table.add_column("#", width=7)
         table.add_column("Repository", width=22)
-        table.add_column("Title", width=48)
+        self._title_col_key = table.add_column("Title", width=48)
         table.add_column("Author", width=15)
         table.add_column("Review Status", width=16)
         table.add_column("Age", width=5)
         table.add_column("Labels", width=22)
+
+        # Set initial title column width based on actual terminal size
+        self._update_title_col_width()
 
         # Start in loading state
         self._set_view("loading")
