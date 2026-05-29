@@ -182,23 +182,51 @@ class PRWatcherApp(App):
         self._error: Optional[str] = None
         self._last_updated: Optional[datetime] = None
         self._next_refresh: Optional[datetime] = None
-        self._title_col_key = None  # set in on_mount; guard on_resize from firing first
+        self._col_keys: dict[str, object] = {}  # populated in on_mount
 
-    def _update_title_col_width(self) -> None:
-        """Recalculate the Title column width to fill available terminal width."""
-        if self._title_col_key is None:
+    @property
+    def _title_col_key(self):
+        return self._col_keys.get("title")
+
+    def _compute_col_widths(self) -> dict[str, int]:
+        """Measure actual content widths and allocate remaining space to Title."""
+        mins  = {"number": 2,  "repo": 10, "title": 10, "author": 6, "review": 8,  "age": 3, "labels": 0}
+        maxes = {"number": 7,  "repo": 30, "title": 999,"author": 20,"review": 16, "age": 5, "labels": 30}
+
+        w = dict(mins)
+        for pr in self._prs:
+            w["number"] = max(w["number"], len(f"#{pr['number']}"))
+            w["repo"]   = max(w["repo"],   len(repo_short_name(pr.get("repository", ""))))
+            w["author"] = max(w["author"], len(pr.get("author", {}).get("login", "")))
+            w["review"] = max(w["review"], len(format_review_status(pr)))
+            w["age"]    = max(w["age"],    len(format_age(pr.get("createdAt", ""))))
+            w["labels"] = max(w["labels"], len(format_labels(pr.get("labels", []))))
+
+        # Apply caps to every column except title
+        for k in ("number", "repo", "author", "review", "age", "labels"):
+            w[k] = min(w[k], maxes[k])
+
+        # Title gets whatever terminal width remains
+        SEPARATORS = 7  # 6 inter-column gaps + 1 left pad
+        fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age", "labels"))
+        w["title"] = max(mins["title"], self.size.width - fixed - SEPARATORS)
+        return w
+
+    def _apply_col_widths(self, widths: dict[str, int]) -> None:
+        if not self._col_keys:
             return
-        # Sum of all fixed columns + 1-char separator between each of the 7 columns
-        # DataTable also adds 1 cell of left padding.
-        FIXED_COLS = 7 + 22 + 15 + 16 + 5 + 22   # all except Title
-        SEPARATORS = 7                              # 6 inter-column + 1 left pad
-        MIN_TITLE = 10
-        new_width = max(MIN_TITLE, self.size.width - FIXED_COLS - SEPARATORS)
         table = self.query_one("#pr-table", DataTable)
-        table.columns[self._title_col_key].width = new_width
-        # Signal DataTable to recalculate layout on next idle cycle
+        for key, col_key in self._col_keys.items():
+            if key in widths:
+                table.columns[col_key].width = widths[key]
         table._require_update_dimensions = True
         table.check_idle()
+
+    def _update_title_col_width(self) -> None:
+        """On terminal resize: recompute all widths (keeps content-fit, adjusts title)."""
+        if not self._col_keys:
+            return
+        self._apply_col_widths(self._compute_col_widths())
 
     def on_resize(self) -> None:
         self._update_title_col_width()
@@ -217,13 +245,13 @@ class PRWatcherApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#pr-table", DataTable)
-        table.add_column("#", width=7)
-        table.add_column("Repository", width=22)
-        self._title_col_key = table.add_column("Title", width=48)
-        table.add_column("Author", width=15)
-        table.add_column("Review Status", width=16)
-        table.add_column("Age", width=5)
-        table.add_column("Labels", width=22)
+        self._col_keys["number"] = table.add_column("#",             width=7)
+        self._col_keys["repo"]   = table.add_column("Repository",   width=22)
+        self._col_keys["title"]  = table.add_column("Title",        width=48)
+        self._col_keys["author"] = table.add_column("Author",       width=15)
+        self._col_keys["review"] = table.add_column("Review Status",width=16)
+        self._col_keys["age"]    = table.add_column("Age",          width=5)
+        self._col_keys["labels"] = table.add_column("Labels",       width=22)
 
         # Set initial title column width based on actual terminal size
         self._update_title_col_width()
@@ -340,12 +368,13 @@ class PRWatcherApp(App):
     # ------------------------------------------------------------------
 
     def _rebuild_table(self) -> None:
+        col_widths = self._compute_col_widths()
         table = self.query_one("#pr-table", DataTable)
         table.clear()
         for pr in self._prs:
             table.add_row(
                 f"#{pr['number']}",
-                ellipsis_middle(repo_short_name(pr.get("repository", "")), 22),
+                ellipsis_middle(repo_short_name(pr.get("repository", "")), col_widths["repo"]),
                 pr.get("title", ""),
                 pr.get("author", {}).get("login", ""),
                 format_review_status(pr),
@@ -353,6 +382,7 @@ class PRWatcherApp(App):
                 format_labels(pr.get("labels", [])),
                 key=str(pr["number"]),
             )
+        self._apply_col_widths(col_widths)
 
     # ------------------------------------------------------------------
     # Status bar
