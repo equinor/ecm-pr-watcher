@@ -26,6 +26,7 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.events import Resize
 from textual.widgets import DataTable, Footer, LoadingIndicator, Static
 from textual import work
 from textual.worker import Worker, WorkerState
@@ -188,8 +189,13 @@ class PRWatcherApp(App):
     def _title_col_key(self):
         return self._col_keys.get("title")
 
-    def _compute_col_widths(self) -> dict[str, int]:
-        """Measure actual content widths; title is capped at content, labels gets the excess."""
+    def _compute_col_widths(self, terminal_width: int | None = None) -> dict[str, int]:
+        """Measure actual content widths; title is capped at content, labels gets the excess.
+
+        Args:
+            terminal_width: Override the terminal width (used from on_resize where
+                self.size.width has not yet been updated by the layout engine).
+        """
         mins  = {"number": 2,  "repo": 10, "title": 10, "author": 6, "review": 8, "age": 3, "labels": 0}
         maxes = {"number": 7,  "repo": 30, "title": 999,"author": 20,"review": 16, "age": 5, "labels": 40}
 
@@ -208,9 +214,14 @@ class PRWatcherApp(App):
             w[k] = max(mins[k], min(w[k], maxes[k]))
 
         # Truly fixed columns: number, repo, author, review, age
-        SEPARATORS = 6  # one space between each of the 7 columns
+        # DataTable.Column.get_render_width() adds 2*cell_padding (default=1) to every
+        # column's width, so with 7 columns the real rendering overhead is 7*2*1 = 14.
+        NUM_COLS = 7
+        CELL_PADDING = 1  # DataTable default
+        SEPARATORS = NUM_COLS * 2 * CELL_PADDING  # = 14
         fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age"))
-        remaining = max(mins["title"] + mins["labels"], self.size.width - fixed - SEPARATORS)
+        width = terminal_width if terminal_width is not None else self.size.width
+        remaining = max(mins["title"] + mins["labels"], width - fixed - SEPARATORS)
 
         # Title takes only what its content needs; labels gets whatever is left (up to its cap)
         title_w  = max(mins["title"],  min(w["title"],  remaining - mins["labels"]))
@@ -232,14 +243,14 @@ class PRWatcherApp(App):
         table._require_update_dimensions = True
         table.check_idle()
 
-    def _update_title_col_width(self) -> None:
+    def _update_title_col_width(self, terminal_width: int | None = None) -> None:
         """On terminal resize: recompute all widths (keeps content-fit, adjusts title)."""
         if not self._col_keys:
             return
-        self._apply_col_widths(self._compute_col_widths())
+        self._apply_col_widths(self._compute_col_widths(terminal_width=terminal_width))
 
-    def on_resize(self) -> None:
-        self._update_title_col_width()
+    def on_resize(self, event: Resize) -> None:
+        self._update_title_col_width(terminal_width=event.size.width)
 
     # ------------------------------------------------------------------
     # Compose + mount
