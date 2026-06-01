@@ -26,6 +26,7 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.coordinate import Coordinate
 from textual.events import Click, MouseScrollDown, MouseScrollUp, Resize
 from textual.message import Message
 from textual.widgets import DataTable, Footer, LoadingIndicator, Static
@@ -186,7 +187,10 @@ class PRTable(DataTable):
     def on_click(self, event: Click) -> None:
         if event.button != 2:
             return
-        coord = self.hover_coordinate
+        meta = event.style.meta
+        if "row" not in meta or "column" not in meta:
+            return
+        coord = Coordinate(meta["row"], meta["column"])
         if not self.is_valid_coordinate(coord):
             return
         row_key, _ = self.coordinate_to_cell_key(coord)

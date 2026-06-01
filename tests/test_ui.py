@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from rich.style import Style as RichStyle
 from textual.coordinate import Coordinate
 from textual.events import Click, MouseScrollDown, MouseScrollUp
 
@@ -158,7 +159,7 @@ async def test_middle_click_opens_url():
 
 
 async def test_middle_click_dispatched_on_button2():
-    """Clicking with button=2 on PRTable dispatches PRTable.MiddleClick."""
+    """Clicking with button=2 on PRTable dispatches PRTable.MiddleClick for the clicked row."""
     config = Config(org="Equinor")
     app = PRWatcherApp(config)
     with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
@@ -166,11 +167,13 @@ async def test_middle_click_dispatched_on_button2():
             await _run_with_mock_prs(app, pilot)
             table = app.query_one("#pr-table", PRTable)
 
+            # Click on the second row (index 1) — style meta mirrors DataTable's rendering
+            row_index = 1
+            style = RichStyle.from_meta({"row": row_index, "column": 0})
+            click_kwargs = dict(x=0, y=0, delta_x=0, delta_y=0, button=2, shift=False, meta=False, ctrl=False, style=style)
             with patch("pr_watcher.app.open_url") as mock_open:
-                click_kwargs = dict(x=0, y=0, delta_x=0, delta_y=0, button=2, shift=False, meta=False, ctrl=False)
                 table.post_message(Click(table, **click_kwargs))
                 await pilot.pause(0.1)
 
-            # hover_coordinate defaults to (0,0); a middle-click should open the first PR
-            mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
+            mock_open.assert_called_once_with(MOCK_PRS[row_index]["url"])
 
