@@ -184,17 +184,19 @@ class PRTable(DataTable):
         self.action_cursor_up()
         event.stop()
 
-    def on_click(self, event: Click) -> None:
-        if event.button != 2:
-            return
-        meta = event.style.meta
-        if "row" not in meta or "column" not in meta:
-            return
-        coord = Coordinate(meta["row"], meta["column"])
-        if not self.is_valid_coordinate(coord):
-            return
-        row_key, _ = self.coordinate_to_cell_key(coord)
-        self.post_message(self.MiddleClick(row_key))
+    async def _on_click(self, event: Click) -> None:
+        if event.button == 2:
+            # Middle-click: open the PR without moving the cursor
+            meta = event.style.meta
+            if "row" in meta and "column" in meta:
+                coord = Coordinate(meta["row"], meta["column"])
+                if self.is_valid_coordinate(coord):
+                    row_key, _ = self.coordinate_to_cell_key(coord)
+                    self.post_message(self.MiddleClick(row_key))
+            event.stop()
+        else:
+            # Left/right click: let DataTable handle it normally
+            await super()._on_click(event)
 
 
 class PRWatcherApp(App):
