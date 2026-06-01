@@ -26,7 +26,7 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.events import Resize
+from textual.events import MouseScrollDown, MouseScrollUp, Resize
 from textual.widgets import DataTable, Footer, LoadingIndicator, Static
 from textual import work
 from textual.worker import Worker, WorkerState
@@ -164,6 +164,18 @@ def open_url(url: str) -> None:
 # Main application
 # ---------------------------------------------------------------------------
 
+class PRTable(DataTable):
+    """DataTable that moves the row cursor on mouse-wheel (mirrors arrow keys)."""
+
+    def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
+        self.action_cursor_down()
+        event.stop()
+
+    def on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
+        self.action_cursor_up()
+        event.stop()
+
+
 class PRWatcherApp(App):
     CSS = APP_CSS
 
@@ -260,7 +272,7 @@ class PRWatcherApp(App):
         yield Static(self._header_text(), id="app-header")
         yield LoadingIndicator(id="loading")
         yield Static("", id="error-panel")
-        yield DataTable(id="pr-table", cursor_type="row", zebra_stripes=True, show_row_labels=False)
+        yield PRTable(id="pr-table", cursor_type="row", zebra_stripes=True, show_row_labels=False)
         yield Static("Starting…", id="status-bar")
         yield Footer()
 
