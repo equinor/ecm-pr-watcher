@@ -26,8 +26,10 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.events import Resize
+from textual.events import Click, MouseScrollDown, MouseScrollUp, Resize
+from textual.message import Message
 from textual.widgets import DataTable, Footer, LoadingIndicator, Static
+from textual.widgets._data_table import RowKey
 from textual import work
 from textual.worker import Worker, WorkerState
 
@@ -164,6 +166,33 @@ def open_url(url: str) -> None:
 # Main application
 # ---------------------------------------------------------------------------
 
+class PRTable(DataTable):
+    """DataTable that moves the row cursor on mouse-wheel and opens PRs on middle-click."""
+
+    class MiddleClick(Message):
+        """Posted when the user middle-clicks a row."""
+        def __init__(self, row_key: RowKey) -> None:
+            super().__init__()
+            self.row_key = row_key
+
+    def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
+        self.action_cursor_down()
+        event.stop()
+
+    def on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
+        self.action_cursor_up()
+        event.stop()
+
+    def on_click(self, event: Click) -> None:
+        if event.button != 2:
+            return
+        coord = self.hover_coordinate
+        if not self.is_valid_coordinate(coord):
+            return
+        row_key, _ = self.coordinate_to_cell_key(coord)
+        self.post_message(self.MiddleClick(row_key))
+
+
 class PRWatcherApp(App):
     CSS = APP_CSS
 
@@ -260,7 +289,7 @@ class PRWatcherApp(App):
         yield Static(self._header_text(), id="app-header")
         yield LoadingIndicator(id="loading")
         yield Static("", id="error-panel")
-        yield DataTable(id="pr-table", cursor_type="row", zebra_stripes=True, show_row_labels=False)
+        yield PRTable(id="pr-table", cursor_type="row", zebra_stripes=True, show_row_labels=False)
         yield Static("Starting…", id="status-bar")
         yield Footer()
 
@@ -458,6 +487,23 @@ class PRWatcherApp(App):
         """Open the selected PR in the browser when Enter is pressed."""
         if not self._prs or event.row_key is None:
             return
+        try:
+            pr_number = int(str(event.row_key.value))
+        except (TypeError, ValueError):
+            return
+        pr = next((p for p in self._prs if p["number"] == pr_number), None)
+        if pr:
+            url = pr.get("url", "")
+            if url:
+                open_url(url)
+                self.notify(
+                    f"Opened PR #{pr['number']} in browser",
+                    title="PR Watcher",
+                    timeout=2,
+                )
+
+    def on_prtable_middle_click(self, event: PRTable.MiddleClick) -> None:
+        """Open the PR URL when the row is middle-clicked."""
         try:
             pr_number = int(str(event.row_key.value))
         except (TypeError, ValueError):

@@ -18,7 +18,10 @@ from unittest.mock import patch
 
 import pytest
 
-from pr_watcher.app import PRWatcherApp
+from textual.coordinate import Coordinate
+from textual.events import Click, MouseScrollDown, MouseScrollUp
+
+from pr_watcher.app import PRTable, PRWatcherApp
 from pr_watcher.config import Config
 
 
@@ -114,4 +117,60 @@ async def test_no_horizontal_scroll_after_resize():
                 f"Horizontal overflow after resize to 160: virtual={table.virtual_size.width}, "
                 f"visible={table.size.width}"
             )
+
+
+async def test_mouse_scroll_moves_row_cursor():
+    """MouseScrollDown/Up move the row cursor instead of scrolling the viewport."""
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            assert table.cursor_row == 0
+
+            scroll_kwargs = dict(x=0, y=0, delta_x=0, delta_y=1, button=0, shift=False, meta=False, ctrl=False)
+            table.post_message(MouseScrollDown(table, **scroll_kwargs))
+            await pilot.pause(0.1)
+            assert table.cursor_row == 1, "scroll down should advance cursor to row 1"
+
+            table.post_message(MouseScrollUp(table, **scroll_kwargs))
+            await pilot.pause(0.1)
+            assert table.cursor_row == 0, "scroll up should return cursor to row 0"
+
+
+async def test_middle_click_opens_url():
+    """Middle-click message on a row opens the PR URL."""
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            row_key = table.ordered_rows[0].key
+
+            with patch("pr_watcher.app.open_url") as mock_open:
+                # Post via table so the message bubbles up to the app handler
+                table.post_message(PRTable.MiddleClick(row_key))
+                await pilot.pause(0.1)
+
+            mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
+
+
+async def test_middle_click_dispatched_on_button2():
+    """Clicking with button=2 on PRTable dispatches PRTable.MiddleClick."""
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+
+            with patch("pr_watcher.app.open_url") as mock_open:
+                click_kwargs = dict(x=0, y=0, delta_x=0, delta_y=0, button=2, shift=False, meta=False, ctrl=False)
+                table.post_message(Click(table, **click_kwargs))
+                await pilot.pause(0.1)
+
+            # hover_coordinate defaults to (0,0); a middle-click should open the first PR
+            mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
 
