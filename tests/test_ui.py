@@ -18,7 +18,9 @@ from unittest.mock import patch
 
 import pytest
 
-from pr_watcher.app import PRWatcherApp
+from textual.events import MouseScrollDown, MouseScrollUp
+
+from pr_watcher.app import PRTable, PRWatcherApp
 from pr_watcher.config import Config
 
 
@@ -114,4 +116,24 @@ async def test_no_horizontal_scroll_after_resize():
                 f"Horizontal overflow after resize to 160: virtual={table.virtual_size.width}, "
                 f"visible={table.size.width}"
             )
+
+
+async def test_mouse_scroll_moves_row_cursor():
+    """MouseScrollDown/Up move the row cursor instead of scrolling the viewport."""
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            assert table.cursor_row == 0
+
+            scroll_kwargs = dict(x=0, y=0, delta_x=0, delta_y=1, button=0, shift=False, meta=False, ctrl=False)
+            table.post_message(MouseScrollDown(table, **scroll_kwargs))
+            await pilot.pause(0.1)
+            assert table.cursor_row == 1, "scroll down should advance cursor to row 1"
+
+            table.post_message(MouseScrollUp(table, **scroll_kwargs))
+            await pilot.pause(0.1)
+            assert table.cursor_row == 0, "scroll up should return cursor to row 0"
 
