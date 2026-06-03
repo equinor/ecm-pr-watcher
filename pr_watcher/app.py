@@ -36,6 +36,14 @@ from textual.worker import Worker, WorkerState
 from .config import Config
 from . import github
 
+_CONNECTIVITY_MARKERS = (
+    "error connecting",
+    "check your internet",
+    "githubstatus",
+    "network",
+    "connection refused",
+    "timeout",
+)
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -378,15 +386,10 @@ class PRWatcherApp(App):
                 seconds=self.config.refresh_interval
             )
 
-            is_connectivity = any(
-                x in self._error.lower()
-                for x in ["error connecting", "check your internet", "githubstatus", "network", "connection refused", "timeout"]
-            )
-            is_auth = any(
-                x in self._error.lower()
-                for x in ["auth", "401", "not logged", "logged in", "authentication"]
-            )
-            not_installed = "not installed" in self._error.lower()
+            error_lc = self._error.lower()
+            is_connectivity = any(x in error_lc for x in _CONNECTIVITY_MARKERS)
+            is_auth = any(x in error_lc for x in ["auth", "401", "not logged", "logged in", "authentication"])
+            not_installed = "not installed" in error_lc
 
             if is_connectivity:
                 # Transient network error — stay in current view and auto-retry
@@ -464,11 +467,8 @@ class PRWatcherApp(App):
             parts.append(f"Refresh in {secs}s")
 
         if self._error:
-            is_connectivity = any(
-                x in self._error.lower()
-                for x in ["error connecting", "check your internet", "githubstatus", "network", "connection refused", "timeout"]
-            )
-            if is_connectivity:
+            error_lc = self._error.lower()
+            if any(x in error_lc for x in _CONNECTIVITY_MARKERS):
                 parts.append("⚠ No internet connection — retrying")
             elif self._prs:
                 parts.append("⚠ Refresh error — showing stale data")
