@@ -21,6 +21,7 @@ import pytest
 
 from textual.coordinate import Coordinate
 from textual.events import Click, MouseScrollDown, MouseScrollUp
+from textual.widgets import Static
 
 from pr_watcher.app import PRTable, PRWatcherApp
 from pr_watcher.config import Config
@@ -244,3 +245,29 @@ async def test_duplicate_pr_numbers_use_repository_identity():
                 await pilot.pause(0.1)
 
             mock_open.assert_called_once_with(duplicate_pr["url"])
+
+
+async def test_connectivity_error_hides_error_panel():
+    """Connectivity errors keep the error panel hidden and show a status bar warning."""
+    from textual.worker import WorkerFailed
+
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    error = RuntimeError(
+        "error connecting to api.github.com\n"
+        "check your internet connection or https://githubstatus.com"
+    )
+    with patch("pr_watcher.github.fetch_all_team_prs", side_effect=error):
+        try:
+            async with app.run_test(size=(220, 40)) as pilot:
+                await pilot.pause(0.5)
+
+                error_panel = app.query_one("#error-panel")
+                assert not error_panel.display, "error-panel must stay hidden for connectivity errors"
+
+                status_text = str(app.query_one("#status-bar", Static).renderable)
+                assert "No internet connection" in status_text, (
+                    f"status bar should contain 'No internet connection', got: {status_text!r}"
+                )
+        except WorkerFailed:
+            pass  # Textual re-raises worker exceptions on teardown; assertions already ran

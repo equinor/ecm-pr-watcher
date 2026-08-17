@@ -36,6 +36,14 @@ from textual.worker import Worker, WorkerState
 from .config import Config
 from . import github
 
+_CONNECTIVITY_MARKERS = (
+    "error connecting",
+    "check your internet",
+    "githubstatus",
+    "network",
+    "connection refused",
+    "timeout",
+)
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -415,38 +423,41 @@ class PRWatcherApp(App):
                 seconds=self.config.refresh_interval
             )
 
-            error_panel = self.query_one("#error-panel", Static)
-            is_auth = any(
-                x in self._error.lower()
-                for x in ["auth", "401", "not logged", "logged in", "authentication"]
-            )
-            not_installed = "not installed" in self._error.lower()
+            error_lc = self._error.lower()
+            is_connectivity = any(x in error_lc for x in _CONNECTIVITY_MARKERS)
+            is_auth = any(x in error_lc for x in ["auth", "401", "not logged", "logged in", "authentication"])
+            not_installed = "not installed" in error_lc
 
-            if not_installed:
-                msg = (
-                    "❌  GitHub CLI (gh) not found\n\n"
-                    "Install from: https://cli.github.com/\n\n"
-                    "Then run: gh auth login"
-                )
-            elif is_auth:
-                msg = (
-                    "❌  GitHub CLI authentication required\n\n"
-                    "Run:  gh auth login\n\n"
-                    "Then restart pr-watcher."
-                )
+            if is_connectivity:
+                # Transient network error — stay in current view and auto-retry
+                self._set_view("table" if self._prs else "loading")
             else:
-                msg = (
-                    f"❌  Error fetching pull requests:\n\n{self._error}\n\n"
-                    "Press 'r' to retry."
-                )
+                error_panel = self.query_one("#error-panel", Static)
+                if not_installed:
+                    msg = (
+                        "❌  GitHub CLI (gh) not found\n\n"
+                        "Install from: https://cli.github.com/\n\n"
+                        "Then run: gh auth login"
+                    )
+                elif is_auth:
+                    msg = (
+                        "❌  GitHub CLI authentication required\n\n"
+                        "Run:  gh auth login\n\n"
+                        "Then restart pr-watcher."
+                    )
+                else:
+                    msg = (
+                        f"❌  Error fetching pull requests:\n\n{self._error}\n\n"
+                        "Press 'r' to retry."
+                    )
 
-            error_panel.update(msg)
+                error_panel.update(msg)
 
-            if self._prs:
-                # Keep stale data visible; show warning in status bar
-                self._set_view("table")
-            else:
-                self._set_view("error")
+                if self._prs:
+                    # Keep stale data visible; show warning in status bar
+                    self._set_view("table")
+                else:
+                    self._set_view("error")
 
             self._update_status_bar()
 
@@ -522,8 +533,12 @@ class PRWatcherApp(App):
             secs = max(0, int((self._next_refresh - datetime.now()).total_seconds()))
             parts.append(f"Refresh in {secs}s")
 
-        if self._error and self._prs:
-            parts.append("⚠ Refresh error — showing stale data")
+        if self._error:
+            error_lc = self._error.lower()
+            if any(x in error_lc for x in _CONNECTIVITY_MARKERS):
+                parts.append("⚠ No internet connection — retrying")
+            elif self._prs:
+                parts.append("⚠ Refresh error — showing stale data")
 
         self.query_one("#status-bar", Static).update("  │  ".join(parts))
 
