@@ -7,10 +7,10 @@ Layout
 │  🔍 PR Watcher  |  Org: acme  |  Team: ECM WO Preparation  │  ← header (1 line)
 ├──────────────────────────────────────────────────────────────┤
 │  DataTable (fills remaining height)                         │
-│   #   Repository     Title             Author  Status  Age  │
-│  ──  ────────────────────────────────────────────────────── │
-│ ► #42  my-service  feat: add widget  alice   ✓ Appr.  2d   │  ← selected row
-│   #41  api-gateway fix: null check   bob    ⏳ Review  5d   │
+│   #   Repository     Title             Author  Status  Age  Comments │
+│  ──  ────────────────────────────────────────────────────────────── │
+│ ► #42  my-service  feat: add widget  alice   ✓ Appr.  2d      3    │  ← selected row
+│   #41  api-gateway fix: null check   bob    ⏳ Review  5d      1    │
 ├──────────────────────────────────────────────────────────────┤
 │  📋 12 PRs  │  Updated 14:23:01  │  Refresh in 45s          │  ← status bar
 ├──────────────────────────────────────────────────────────────┤
@@ -126,6 +126,10 @@ def format_labels(labels: list[dict]) -> str:
     return result
 
 
+def comment_count(pr: dict) -> int:
+    return pr.get("totalCommentsCount", 0)
+
+
 def repo_short_name(full_name: str) -> str:
     parts = full_name.split("/", 1)
     return parts[1] if len(parts) == 2 else full_name
@@ -208,6 +212,8 @@ class PRWatcherApp(App):
         self.config = config
         self._prs: list[dict] = []
         self._known_pr_numbers: set[int] = set()
+        self._comment_counts: dict[tuple[str, int], int] = {}
+        self._unread_comment_updates: set[tuple[str, int]] = set()
         self._loading: bool = False
         self._error: Optional[str] = None
         self._last_updated: Optional[datetime] = None
@@ -225,8 +231,26 @@ class PRWatcherApp(App):
             terminal_width: Override the terminal width (used from on_resize where
                 self.size.width has not yet been updated by the layout engine).
         """
-        mins  = {"number": 2,  "repo": 10, "title": 10, "author": 6, "review": 8, "age": 3, "labels": 0}
-        maxes = {"number": 7,  "repo": 30, "title": 999,"author": 20,"review": 16, "age": 5, "labels": 40}
+        mins = {
+            "number": 2,
+            "repo": 10,
+            "title": 10,
+            "author": 6,
+            "review": 8,
+            "age": 3,
+            "comments": 8,
+            "labels": 0,
+        }
+        maxes = {
+            "number": 7,
+            "repo": 30,
+            "title": 999,
+            "author": 20,
+            "review": 16,
+            "age": 5,
+            "comments": 8,
+            "labels": 40,
+        }
 
         w = dict(mins)
         for pr in self._prs:
@@ -236,19 +260,20 @@ class PRWatcherApp(App):
             w["author"] = max(w["author"], len(pr.get("author", {}).get("login", "")))
             w["review"] = max(w["review"], len(format_review_status(pr)))
             w["age"]    = max(w["age"],    len(format_age(pr.get("createdAt", ""))))
+            w["comments"] = max(w["comments"], len(str(comment_count(pr))) + 1)
             w["labels"] = max(w["labels"], len(format_labels(pr.get("labels", []))))
 
         # Apply caps to all columns
         for k in mins:
             w[k] = max(mins[k], min(w[k], maxes[k]))
 
-        # Truly fixed columns: number, repo, author, review, age
+        # Truly fixed columns: number, repo, author, review, age, comments
         # DataTable.Column.get_render_width() adds 2*cell_padding (default=1) to every
-        # column's width, so with 7 columns the real rendering overhead is 7*2*1 = 14.
-        NUM_COLS = 7
+        # column's width, so with 8 columns the real rendering overhead is 8*2*1 = 16.
+        NUM_COLS = 8
         CELL_PADDING = 1  # DataTable default
-        SEPARATORS = NUM_COLS * 2 * CELL_PADDING  # = 14
-        fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age"))
+        SEPARATORS = NUM_COLS * 2 * CELL_PADDING  # = 16
+        fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age", "comments"))
         width = terminal_width if terminal_width is not None else self.size.width
         remaining = max(mins["title"] + mins["labels"], width - fixed - SEPARATORS)
 
@@ -301,6 +326,7 @@ class PRWatcherApp(App):
         self._col_keys["author"] = table.add_column("Author",       width=15)
         self._col_keys["review"] = table.add_column("Review Status",width=16)
         self._col_keys["age"]    = table.add_column("Age",          width=5)
+        self._col_keys["comments"] = table.add_column("Comments",   width=8)
         self._col_keys["labels"] = table.add_column("Labels",       width=22)
 
         # Set initial title column width based on actual terminal size
@@ -353,11 +379,22 @@ class PRWatcherApp(App):
         if event.state == WorkerState.SUCCESS:
             new_prs: list[dict] = event.worker.result or []
             new_numbers = {pr["number"] for pr in new_prs}
+            new_comment_counts = {
+                self._pr_identity(pr): comment_count(pr) for pr in new_prs
+            }
 
             # Ring bell for any PRs that weren't in the previous fetch
             if self.config.bell and self._known_pr_numbers and (new_numbers - self._known_pr_numbers):
                 self.bell()
 
+            self._unread_comment_updates.intersection_update(new_comment_counts)
+            self._unread_comment_updates.update(
+                identity
+                for identity, count in new_comment_counts.items()
+                if identity in self._comment_counts
+                and count > self._comment_counts[identity]
+            )
+            self._comment_counts = new_comment_counts
             self._known_pr_numbers = new_numbers
             self._prs = new_prs
             self._error = None
@@ -417,6 +454,26 @@ class PRWatcherApp(App):
     # Table population
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _pr_identity(pr: dict) -> tuple[str, int]:
+        return pr.get("repository", ""), pr["number"]
+
+    def _comment_display(self, pr: dict) -> str:
+        suffix = "!" if self._pr_identity(pr) in self._unread_comment_updates else ""
+        return f"{comment_count(pr)}{suffix}"
+
+    def _acknowledge_comment_update(self, pr: dict) -> None:
+        identity = self._pr_identity(pr)
+        if identity not in self._unread_comment_updates:
+            return
+        self._unread_comment_updates.remove(identity)
+        table = self.query_one("#pr-table", DataTable)
+        table.update_cell(
+            str(pr["number"]),
+            self._col_keys["comments"],
+            str(comment_count(pr)),
+        )
+
     def _rebuild_table(self) -> None:
         col_widths = self._compute_col_widths()
         table = self.query_one("#pr-table", DataTable)
@@ -429,6 +486,7 @@ class PRWatcherApp(App):
                 pr.get("author", {}).get("login", ""),
                 format_review_status(pr),
                 format_age(pr.get("createdAt", "")),
+                self._comment_display(pr),
                 format_labels(pr.get("labels", [])),
                 key=str(pr["number"]),
             )
@@ -493,6 +551,7 @@ class PRWatcherApp(App):
             return
         pr = next((p for p in self._prs if p["number"] == pr_number), None)
         if pr:
+            self._acknowledge_comment_update(pr)
             url = pr.get("url", "")
             if url:
                 open_url(url)
@@ -526,6 +585,7 @@ class PRWatcherApp(App):
         row_idx = table.cursor_row
         if 0 <= row_idx < len(self._prs):
             pr = self._prs[row_idx]
+            self._acknowledge_comment_update(pr)
             url = pr.get("url", "")
             if url:
                 open_url(url)

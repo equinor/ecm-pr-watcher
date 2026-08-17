@@ -8,6 +8,35 @@ from datetime import datetime
 from typing import Optional
 
 
+_OPEN_PRS_QUERY = """
+query($owner: String!, $name: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      states: OPEN
+      first: 100
+      after: $endCursor
+      orderBy: {field: CREATED_AT, direction: DESC}
+    ) {
+      nodes {
+        number
+        title
+        author { login }
+        labels(first: 100) { nodes { name } }
+        reviewDecision
+        createdAt
+        updatedAt
+        url
+        isDraft
+        headRefName
+        totalCommentsCount
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+
 def check_auth() -> Optional[str]:
     """Return None if `gh` is installed and authenticated, else an error string."""
     try:
@@ -63,19 +92,20 @@ def fetch_team_repos(org: str, team_slug: str) -> list[str]:
 
 def fetch_prs_for_repo(repo: str) -> list[dict]:
     """Return open PRs for a single repository with rich metadata."""
+    owner, name = repo.split("/", 1)
     result = subprocess.run(
         [
             "gh",
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "open",
-            "--json",
-            "number,title,author,labels,reviewDecision,createdAt,updatedAt,url,isDraft,headRefName",
-            "--limit",
-            "200",
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-f",
+            f"query={_OPEN_PRS_QUERY}",
         ],
         capture_output=True,
         text=True,
@@ -93,9 +123,14 @@ def fetch_prs_for_repo(repo: str) -> list[dict]:
             return []
         raise RuntimeError(f"{repo}: {result.stderr.strip()}")
 
-    prs: list[dict] = json.loads(result.stdout)
-    for pr in prs:
-        pr["repository"] = repo
+    pages: list[dict] = json.loads(result.stdout)
+    prs: list[dict] = []
+    for page in pages:
+        nodes = page["data"]["repository"]["pullRequests"]["nodes"]
+        for pr in nodes:
+            pr["labels"] = pr["labels"]["nodes"]
+            pr["repository"] = repo
+            prs.append(pr)
     return prs
 
 
