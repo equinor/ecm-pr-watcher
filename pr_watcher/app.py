@@ -211,7 +211,7 @@ class PRWatcherApp(App):
         super().__init__()
         self.config = config
         self._prs: list[dict] = []
-        self._known_pr_numbers: set[int] = set()
+        self._known_prs: set[tuple[str, int]] = set()
         self._comment_counts: dict[tuple[str, int], int] = {}
         self._unread_comment_updates: set[tuple[str, int]] = set()
         self._loading: bool = False
@@ -378,13 +378,13 @@ class PRWatcherApp(App):
 
         if event.state == WorkerState.SUCCESS:
             new_prs: list[dict] = event.worker.result or []
-            new_numbers = {pr["number"] for pr in new_prs}
+            new_identities = {self._pr_identity(pr) for pr in new_prs}
             new_comment_counts = {
                 self._pr_identity(pr): comment_count(pr) for pr in new_prs
             }
 
             # Ring bell for any PRs that weren't in the previous fetch
-            if self.config.bell and self._known_pr_numbers and (new_numbers - self._known_pr_numbers):
+            if self.config.bell and self._known_prs and (new_identities - self._known_prs):
                 self.bell()
 
             self._unread_comment_updates.intersection_update(new_comment_counts)
@@ -395,7 +395,7 @@ class PRWatcherApp(App):
                 and count > self._comment_counts[identity]
             )
             self._comment_counts = new_comment_counts
-            self._known_pr_numbers = new_numbers
+            self._known_prs = new_identities
             self._prs = new_prs
             self._error = None
             self._loading = False
@@ -458,6 +458,15 @@ class PRWatcherApp(App):
     def _pr_identity(pr: dict) -> tuple[str, int]:
         return pr.get("repository", ""), pr["number"]
 
+    @staticmethod
+    def _row_key(pr: dict) -> str:
+        repository, number = PRWatcherApp._pr_identity(pr)
+        return f"{repository}#{number}"
+
+    def _pr_for_row_key(self, row_key: RowKey) -> Optional[dict]:
+        key = str(row_key.value)
+        return next((pr for pr in self._prs if self._row_key(pr) == key), None)
+
     def _comment_display(self, pr: dict) -> str:
         suffix = "!" if self._pr_identity(pr) in self._unread_comment_updates else ""
         return f"{comment_count(pr)}{suffix}"
@@ -469,7 +478,7 @@ class PRWatcherApp(App):
         self._unread_comment_updates.remove(identity)
         table = self.query_one("#pr-table", DataTable)
         table.update_cell(
-            str(pr["number"]),
+            self._row_key(pr),
             self._col_keys["comments"],
             str(comment_count(pr)),
         )
@@ -488,7 +497,7 @@ class PRWatcherApp(App):
                 format_age(pr.get("createdAt", "")),
                 self._comment_display(pr),
                 format_labels(pr.get("labels", [])),
-                key=str(pr["number"]),
+                key=self._row_key(pr),
             )
         self._apply_col_widths(col_widths)
 
@@ -545,11 +554,7 @@ class PRWatcherApp(App):
         """Open the selected PR in the browser when Enter is pressed."""
         if not self._prs or event.row_key is None:
             return
-        try:
-            pr_number = int(str(event.row_key.value))
-        except (TypeError, ValueError):
-            return
-        pr = next((p for p in self._prs if p["number"] == pr_number), None)
+        pr = self._pr_for_row_key(event.row_key)
         if pr:
             self._acknowledge_comment_update(pr)
             url = pr.get("url", "")
@@ -563,11 +568,7 @@ class PRWatcherApp(App):
 
     def on_prtable_middle_click(self, event: PRTable.MiddleClick) -> None:
         """Open the PR URL when the row is middle-clicked."""
-        try:
-            pr_number = int(str(event.row_key.value))
-        except (TypeError, ValueError):
-            return
-        pr = next((p for p in self._prs if p["number"] == pr_number), None)
+        pr = self._pr_for_row_key(event.row_key)
         if pr:
             url = pr.get("url", "")
             if url:

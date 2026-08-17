@@ -115,6 +115,7 @@ class TestFetchPrsForRepo:
         command = run.call_args.args[0]
         query_arg = next(arg for arg in command if arg.startswith("query="))
         assert "totalCommentsCount" in query_arg
+        assert query_arg == query_arg.strip()
         assert "--paginate" in command
         assert "--slurp" in command
 

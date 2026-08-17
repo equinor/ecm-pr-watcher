@@ -194,18 +194,53 @@ async def test_comment_increase_marked_until_row_selected():
         async with app.run_test(size=(220, 40)) as pilot:
             await _run_with_mock_prs(app, pilot)
             table = app.query_one("#pr-table", PRTable)
-            assert table.get_row("42")[6] == "1"
+            row_key = "Equinor/ecm-api-backend#42"
+            assert table.get_row(row_key)[6] == "1"
 
             app.action_refresh()
             await pilot.pause(0.5)
-            assert table.get_row("42")[6] == "2!"
+            assert table.get_row(row_key)[6] == "2!"
 
             app.action_refresh()
             await pilot.pause(0.5)
-            assert table.get_row("42")[6] == "2!"
+            assert table.get_row(row_key)[6] == "2!"
 
             with patch("pr_watcher.app.open_url"):
                 await pilot.press("enter")
                 await pilot.pause(0.1)
 
-            assert table.get_row("42")[6] == "2"
+            assert table.get_row(row_key)[6] == "2"
+
+
+async def test_duplicate_pr_numbers_use_repository_identity():
+    """PRs with the same number remain distinct across repositories."""
+    initial_pr = deepcopy(MOCK_PRS[0])
+    duplicate_pr = deepcopy(MOCK_PRS[0])
+    duplicate_pr["repository"] = "Equinor/ecm-other-service"
+    duplicate_pr["url"] = "https://github.com/Equinor/ecm-other-service/pull/42"
+
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch(
+        "pr_watcher.github.fetch_all_team_prs",
+        side_effect=[[initial_pr], [initial_pr, duplicate_pr]],
+    ), patch.object(app, "bell") as mock_bell:
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+
+            table = app.query_one("#pr-table", PRTable)
+            assert table.row_count == 2
+            assert table.get_row("Equinor/ecm-api-backend#42")
+            assert table.get_row("Equinor/ecm-other-service#42")
+            mock_bell.assert_called_once()
+
+            with patch("pr_watcher.app.open_url") as mock_open:
+                table.post_message(
+                    PRTable.MiddleClick(table.ordered_rows[1].key)
+                )
+                await pilot.pause(0.1)
+
+            mock_open.assert_called_once_with(duplicate_pr["url"])

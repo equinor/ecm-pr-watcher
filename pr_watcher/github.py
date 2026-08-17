@@ -34,7 +34,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
     }
   }
 }
-"""
+""".strip()
 
 
 def check_auth() -> Optional[str]:
