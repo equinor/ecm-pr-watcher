@@ -6,13 +6,14 @@ runs.
 
 Root cause guarded against:
     DataTable.Column.get_render_width() adds ``2 * cell_padding`` (default = 1)
-    to every column's stored width.  With 7 columns that is 14 characters of
-    rendering overhead.  The original code used ``SEPARATORS = 6``, which was 8
+    to every column's stored width.  With 8 columns that is 16 characters of
+    rendering overhead.  The original code used ``SEPARATORS = 6``, which was 10
     characters too small, causing virtual_size.width > size.width and a
     persistent horizontal scrollbar.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -39,6 +40,7 @@ MOCK_PRS = [
         "reviewDecision": "APPROVED",
         "isDraft": False,
         "createdAt": _iso(timedelta(days=2)),
+        "totalCommentsCount": 1,
         "labels": [{"name": "feature"}, {"name": "backend"}],
         "url": "https://github.com/Equinor/ecm-api-backend/pull/42",
     },
@@ -50,6 +52,7 @@ MOCK_PRS = [
         "reviewDecision": "REVIEW_REQUIRED",
         "isDraft": False,
         "createdAt": _iso(timedelta(days=5)),
+        "totalCommentsCount": 0,
         "labels": [],
         "url": "https://github.com/Equinor/ecm-iso-wp-gl0560-api-iac/pull/41",
     },
@@ -61,6 +64,7 @@ MOCK_PRS = [
         "reviewDecision": "CHANGES_REQUESTED",
         "isDraft": False,
         "createdAt": _iso(timedelta(hours=3)),
+        "totalCommentsCount": 2,
         "labels": [{"name": "chore"}, {"name": "deps"}, {"name": "semver"}, {"name": "auto"}],
         "url": "https://github.com/Equinor/ecm-wo-preparation-service/pull/100",
     },
@@ -176,6 +180,73 @@ async def test_middle_click_dispatched_on_button2():
             mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
 
 
+async def test_comment_increase_marked_until_row_selected():
+    """A comment increase gets a persistent marker that Enter acknowledges."""
+    initial_prs = deepcopy(MOCK_PRS)
+    updated_prs = deepcopy(MOCK_PRS)
+    updated_prs[0]["totalCommentsCount"] += 1
+
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch(
+        "pr_watcher.github.fetch_all_team_prs",
+        side_effect=[initial_prs, updated_prs, deepcopy(updated_prs)],
+    ):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            row_key = "Equinor/ecm-api-backend#42"
+            assert table.get_row(row_key)[6] == "1"
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+            assert table.get_row(row_key)[6] == "2!"
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+            assert table.get_row(row_key)[6] == "2!"
+
+            with patch("pr_watcher.app.open_url"):
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+
+            assert table.get_row(row_key)[6] == "2"
+
+
+async def test_duplicate_pr_numbers_use_repository_identity():
+    """PRs with the same number remain distinct across repositories."""
+    initial_pr = deepcopy(MOCK_PRS[0])
+    duplicate_pr = deepcopy(MOCK_PRS[0])
+    duplicate_pr["repository"] = "Equinor/ecm-other-service"
+    duplicate_pr["url"] = "https://github.com/Equinor/ecm-other-service/pull/42"
+
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch(
+        "pr_watcher.github.fetch_all_team_prs",
+        side_effect=[[initial_pr], [initial_pr, duplicate_pr]],
+    ), patch.object(app, "bell") as mock_bell:
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+
+            table = app.query_one("#pr-table", PRTable)
+            assert table.row_count == 2
+            assert table.get_row("Equinor/ecm-api-backend#42")
+            assert table.get_row("Equinor/ecm-other-service#42")
+            mock_bell.assert_called_once()
+
+            with patch("pr_watcher.app.open_url") as mock_open:
+                table.post_message(
+                    PRTable.MiddleClick(table.ordered_rows[1].key)
+                )
+                await pilot.pause(0.1)
+
+            mock_open.assert_called_once_with(duplicate_pr["url"])
+
+
 async def test_connectivity_error_hides_error_panel():
     """Connectivity errors keep the error panel hidden and show a status bar warning."""
     from textual.worker import WorkerFailed
@@ -200,4 +271,3 @@ async def test_connectivity_error_hides_error_panel():
                 )
         except WorkerFailed:
             pass  # Textual re-raises worker exceptions on teardown; assertions already ran
-

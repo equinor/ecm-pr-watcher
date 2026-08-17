@@ -17,6 +17,19 @@ def _run_result(stdout="", stderr="", returncode=0):
     return m
 
 
+def _graphql_page(prs):
+    return {
+        "data": {
+            "repository": {
+                "pullRequests": {
+                    "nodes": prs,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # check_auth
 # ---------------------------------------------------------------------------
@@ -76,11 +89,49 @@ class TestFetchTeamRepos:
 
 class TestFetchPrsForRepo:
     def test_returns_prs_with_repository_field(self):
-        prs = [{"number": 1, "title": "Fix bug"}, {"number": 2, "title": "Add feature"}]
-        with patch("pr_watcher.github.subprocess.run", return_value=_run_result(stdout=json.dumps(prs))):
+        prs = [
+            {
+                "number": 1,
+                "title": "Fix bug",
+                "labels": {"nodes": [{"name": "bug"}]},
+                "totalCommentsCount": 4,
+            },
+            {
+                "number": 2,
+                "title": "Add feature",
+                "labels": {"nodes": []},
+                "totalCommentsCount": 2,
+            },
+        ]
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(stdout=json.dumps([_graphql_page(prs)])),
+        ) as run:
             result = github.fetch_prs_for_repo("Equinor/my-repo")
         assert all(pr["repository"] == "Equinor/my-repo" for pr in result)
         assert len(result) == 2
+        assert result[0]["labels"] == [{"name": "bug"}]
+        assert result[0]["totalCommentsCount"] == 4
+        command = run.call_args.args[0]
+        query_arg = next(arg for arg in command if arg.startswith("query="))
+        assert "totalCommentsCount" in query_arg
+        assert query_arg == query_arg.strip()
+        assert "--paginate" in command
+        assert "--slurp" in command
+
+    def test_merges_paginated_results(self):
+        page1 = _graphql_page([
+            {"number": 1, "labels": {"nodes": []}, "totalCommentsCount": 1}
+        ])
+        page2 = _graphql_page([
+            {"number": 2, "labels": {"nodes": []}, "totalCommentsCount": 2}
+        ])
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(stdout=json.dumps([page1, page2])),
+        ):
+            result = github.fetch_prs_for_repo("Equinor/my-repo")
+        assert [pr["number"] for pr in result] == [1, 2]
 
     def test_disabled_prs_returns_empty(self):
         with patch("pr_watcher.github.subprocess.run", return_value=_run_result(
@@ -102,24 +153,44 @@ class TestFetchPrsForRepo:
 
 class TestFetchAllTeamPrs:
     def test_sorted_newest_first(self):
-        repos = [{"full_name": "Equinor/repo-a"}]
         prs = [
-            {"number": 1, "createdAt": "2024-01-01T00:00:00Z"},
-            {"number": 2, "createdAt": "2024-06-01T00:00:00Z"},
+            {
+                "number": 1,
+                "createdAt": "2024-01-01T00:00:00Z",
+                "labels": {"nodes": []},
+            },
+            {
+                "number": 2,
+                "createdAt": "2024-06-01T00:00:00Z",
+                "labels": {"nodes": []},
+            },
         ]
         with patch("pr_watcher.github.fetch_team_repos", return_value=["Equinor/repo-a"]):
-            with patch("pr_watcher.github.subprocess.run", return_value=_run_result(stdout=json.dumps(prs))):
+            with patch(
+                "pr_watcher.github.subprocess.run",
+                return_value=_run_result(stdout=json.dumps([_graphql_page(prs)])),
+            ):
                 result = github.fetch_all_team_prs("Equinor", "my-team")
         assert result[0]["number"] == 2
         assert result[1]["number"] == 1
 
     def test_per_repo_errors_are_swallowed(self):
         with patch("pr_watcher.github.fetch_team_repos", return_value=["Equinor/good", "Equinor/bad"]):
-            good_prs = [{"number": 1, "createdAt": "2024-01-01T00:00:00Z"}]
+            good_prs = [
+                {
+                    "number": 1,
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "labels": {"nodes": []},
+                }
+            ]
+
             def side_effect(cmd, **kwargs):
-                if "Equinor/bad" in cmd:
+                if "name=bad" in cmd:
                     return _run_result(stderr="unexpected error", returncode=1)
-                return _run_result(stdout=json.dumps(good_prs))
+                return _run_result(
+                    stdout=json.dumps([_graphql_page(good_prs)])
+                )
+
             with patch("pr_watcher.github.subprocess.run", side_effect=side_effect):
                 result = github.fetch_all_team_prs("Equinor", "my-team")
         assert len(result) == 1
