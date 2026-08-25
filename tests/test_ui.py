@@ -162,6 +162,24 @@ async def test_middle_click_opens_url():
             mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
 
 
+async def test_rapid_duplicate_opens_are_debounced():
+    """Rapid open events for the same PR open only one browser tab."""
+    config = Config(org="Equinor")
+    app = PRWatcherApp(config)
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            row_key = table.ordered_rows[0].key
+
+            with patch("pr_watcher.app.open_url") as mock_open:
+                table.post_message(PRTable.MiddleClick(row_key))
+                table.post_message(PRTable.MiddleClick(row_key))
+                await pilot.pause(0.1)
+
+            mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
+
+
 async def test_middle_click_dispatched_on_button2():
     """Clicking with button=2 on PRTable dispatches PRTable.MiddleClick."""
     config = Config(org="Equinor")

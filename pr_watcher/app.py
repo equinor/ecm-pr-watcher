@@ -22,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from time import monotonic
 from typing import Optional
 
 from textual.app import App, ComposeResult
@@ -227,6 +228,8 @@ class PRWatcherApp(App):
         self._last_updated: Optional[datetime] = None
         self._next_refresh: Optional[datetime] = None
         self._col_keys: dict[str, object] = {}  # populated in on_mount
+        self._last_opened_url: Optional[str] = None
+        self._last_opened_at: Optional[float] = None
 
     @property
     def _title_col_key(self):
@@ -565,6 +568,34 @@ class PRWatcherApp(App):
             self._next_refresh = None
             self._start_fetch()
 
+    _OPEN_PR_DEBOUNCE_SECONDS = 1.0
+
+    def _open_pr(self, pr: dict) -> None:
+        """Open a PR's URL in the browser, debouncing rapid duplicate triggers.
+
+        A double-click (or a click quickly followed by Enter) can fire this
+        twice for the same PR in quick succession, opening two browser tabs.
+        Suppress repeat opens of the same URL within a short window.
+        """
+        url = pr.get("url", "")
+        if not url:
+            return
+        now = monotonic()
+        if (
+            url == self._last_opened_url
+            and self._last_opened_at is not None
+            and now - self._last_opened_at < self._OPEN_PR_DEBOUNCE_SECONDS
+        ):
+            return
+        self._last_opened_url = url
+        self._last_opened_at = now
+        open_url(url)
+        self.notify(
+            f"Opened PR #{pr['number']} in browser",
+            title="PR Watcher",
+            timeout=2,
+        )
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Open the selected PR in the browser when Enter is pressed."""
         if not self._prs or event.row_key is None:
@@ -572,27 +603,13 @@ class PRWatcherApp(App):
         pr = self._pr_for_row_key(event.row_key)
         if pr:
             self._acknowledge_comment_update(pr)
-            url = pr.get("url", "")
-            if url:
-                open_url(url)
-                self.notify(
-                    f"Opened PR #{pr['number']} in browser",
-                    title="PR Watcher",
-                    timeout=2,
-                )
+            self._open_pr(pr)
 
     def on_prtable_middle_click(self, event: PRTable.MiddleClick) -> None:
         """Open the PR URL when the row is middle-clicked."""
         pr = self._pr_for_row_key(event.row_key)
         if pr:
-            url = pr.get("url", "")
-            if url:
-                open_url(url)
-                self.notify(
-                    f"Opened PR #{pr['number']} in browser",
-                    title="PR Watcher",
-                    timeout=2,
-                )
+            self._open_pr(pr)
 
     def action_open_pr(self) -> None:
         table = self.query_one("#pr-table", DataTable)
@@ -602,11 +619,4 @@ class PRWatcherApp(App):
         if 0 <= row_idx < len(self._prs):
             pr = self._prs[row_idx]
             self._acknowledge_comment_update(pr)
-            url = pr.get("url", "")
-            if url:
-                open_url(url)
-                self.notify(
-                    f"Opened PR #{pr['number']} in browser",
-                    title="PR Watcher",
-                    timeout=2,
-                )
+            self._open_pr(pr)
