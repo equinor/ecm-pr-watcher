@@ -22,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from time import monotonic
 from typing import Optional
 
 from textual.app import App, ComposeResult
@@ -228,7 +229,7 @@ class PRWatcherApp(App):
         self._next_refresh: Optional[datetime] = None
         self._col_keys: dict[str, object] = {}  # populated in on_mount
         self._last_opened_url: Optional[str] = None
-        self._last_opened_at: Optional[datetime] = None
+        self._last_opened_at: Optional[float] = None
 
     @property
     def _title_col_key(self):
@@ -567,7 +568,7 @@ class PRWatcherApp(App):
             self._next_refresh = None
             self._start_fetch()
 
-    _OPEN_PR_DEBOUNCE = timedelta(seconds=1)
+    _OPEN_PR_DEBOUNCE_SECONDS = 1.0
 
     def _open_pr(self, pr: dict) -> None:
         """Open a PR's URL in the browser, debouncing rapid duplicate triggers.
@@ -579,11 +580,11 @@ class PRWatcherApp(App):
         url = pr.get("url", "")
         if not url:
             return
-        now = datetime.now()
+        now = monotonic()
         if (
             url == self._last_opened_url
             and self._last_opened_at is not None
-            and now - self._last_opened_at < self._OPEN_PR_DEBOUNCE
+            and now - self._last_opened_at < self._OPEN_PR_DEBOUNCE_SECONDS
         ):
             return
         self._last_opened_url = url
