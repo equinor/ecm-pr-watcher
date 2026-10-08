@@ -21,6 +21,22 @@ query($owner: String!, $name: String!, $endCursor: String) {
         number
         title
         author { login }
+        reviewRequests(first: 100) {
+          nodes {
+            requestedReviewer {
+              ... on User { login }
+              ... on Bot { login }
+              ... on Mannequin { login }
+              ... on Team { slug }
+            }
+          }
+        }
+        latestReviews(first: 100) {
+          nodes {
+            author { login }
+            state
+          }
+        }
         labels(first: 100) { nodes { name } }
         reviewDecision
         createdAt

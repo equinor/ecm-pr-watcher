@@ -95,6 +95,13 @@ class TestFetchPrsForRepo:
                 "title": "Fix bug",
                 "labels": {"nodes": [{"name": "bug"}]},
                 "totalCommentsCount": 4,
+                "reviewRequests": {"nodes": [
+                    {"requestedReviewer": {"login": "alice"}},
+                    {"requestedReviewer": {"slug": "my-team"}},
+                ]},
+                "latestReviews": {"nodes": [
+                    {"author": {"login": "bob"}, "state": "APPROVED"},
+                ]},
             },
             {
                 "number": 2,
@@ -112,9 +119,17 @@ class TestFetchPrsForRepo:
         assert len(result) == 2
         assert result[0]["labels"] == [{"name": "bug"}]
         assert result[0]["totalCommentsCount"] == 4
+        assert result[0]["reviewRequests"] == prs[0]["reviewRequests"]
+        assert result[0]["latestReviews"] == prs[0]["latestReviews"]
         command = run.call_args.args[0]
         query_arg = next(arg for arg in command if arg.startswith("query="))
         assert "totalCommentsCount" in query_arg
+        assert "reviewRequests(first: 100)" in query_arg
+        assert "... on Team { slug }" in query_arg
+        assert "... on User { login }" in query_arg
+        assert "... on Bot { login }" in query_arg
+        assert "... on Mannequin { login }" in query_arg
+        assert "latestReviews(first: 100)" in query_arg
         assert query_arg == query_arg.strip()
         assert "--paginate" in command
         assert "--slurp" in command

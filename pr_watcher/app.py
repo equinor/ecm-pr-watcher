@@ -7,7 +7,7 @@ Layout
 │  🔍 PR Watcher  |  Org: acme  |  Team: ECM WO Preparation  │  ← header (1 line)
 ├──────────────────────────────────────────────────────────────┤
 │  DataTable (fills remaining height)                         │
-│   #   Repository     Title             Author  Status  Age  Comments │
+│   #   Repository     Title             Author  Reviewers  Status  Age  Comments │
 │  ──  ────────────────────────────────────────────────────────────── │
 │ ► #42  my-service  feat: add widget  alice   ✓ Appr.  2d      3    │  ← selected row
 │   #41  api-gateway fix: null check   bob    ⏳ Review  5d      1    │
@@ -25,9 +25,12 @@ from datetime import datetime, timedelta
 from time import monotonic
 from typing import Optional
 
+from rich.cells import cell_len
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.events import Click, MouseScrollDown, MouseScrollUp, Resize
+from textual.coordinate import Coordinate
+from textual.events import Click, MouseMove, MouseScrollDown, MouseScrollUp, Resize
 from textual.message import Message
 from textual.widgets import DataTable, Footer, LoadingIndicator, Static
 from textual.widgets._data_table import RowKey
@@ -45,6 +48,13 @@ _CONNECTIVITY_MARKERS = (
     "connection refused",
     "timeout",
 )
+
+_COPILOT_REVIEWER_LOGINS = {
+    "copilot",
+    "copilot[bot]",
+    "copilot-pull-request-reviewer",
+    "copilot-pull-request-reviewer[bot]",
+}
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -135,6 +145,23 @@ def format_labels(labels: list[dict]) -> str:
     return result
 
 
+def format_reviewers(pr: dict) -> str:
+    """Combine requested users/teams and submitted reviewers without duplicates."""
+    names: set[str] = set()
+    for request in pr.get("reviewRequests", {}).get("nodes", []):
+        reviewer = request.get("requestedReviewer") or {}
+        if reviewer.get("login"):
+            names.add(reviewer["login"])
+        elif reviewer.get("slug"):
+            names.add(f"team:{reviewer['slug']}")
+    for review in pr.get("latestReviews", {}).get("nodes", []):
+        author = review.get("author") or {}
+        if review.get("state") != "PENDING" and author.get("login"):
+            names.add(author["login"])
+    names = {name for name in names if name.casefold() not in _COPILOT_REVIEWER_LOGINS}
+    return ", ".join(sorted(names, key=str.casefold)) or "—"
+
+
 def comment_count(pr: dict) -> int:
     return pr.get("totalCommentsCount", 0)
 
@@ -187,6 +214,22 @@ class PRTable(DataTable):
         def __init__(self, row_key: RowKey) -> None:
             super().__init__()
             self.row_key = row_key
+
+    class CellHovered(Message):
+        def __init__(self, coordinate: Coordinate | None) -> None:
+            super().__init__()
+            self.coordinate = coordinate
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        meta = event.style.meta
+        coordinate = Coordinate(meta.get("row", -1), meta.get("column", -1))
+        if meta.get("out_of_bounds") or not self.is_valid_coordinate(coordinate):
+            self.post_message(self.CellHovered(None))
+        else:
+            self.post_message(self.CellHovered(coordinate))
+
+    def on_leave(self) -> None:
+        self.post_message(self.CellHovered(None))
 
     def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
         self.action_cursor_down()
@@ -247,6 +290,7 @@ class PRWatcherApp(App):
             "repo": 10,
             "title": 10,
             "author": 6,
+            "reviewers": 9,
             "review": 8,
             "age": 3,
             "comments": 8,
@@ -257,6 +301,7 @@ class PRWatcherApp(App):
             "repo": 30,
             "title": 999,
             "author": 20,
+            "reviewers": 30,
             "review": 16,
             "age": 5,
             "comments": 8,
@@ -269,6 +314,7 @@ class PRWatcherApp(App):
             w["repo"]   = max(w["repo"],   len(repo_short_name(pr.get("repository", ""))))
             w["title"]  = max(w["title"],  len(pr.get("title", "")))
             w["author"] = max(w["author"], len(pr.get("author", {}).get("login", "")))
+            w["reviewers"] = max(w["reviewers"], len(format_reviewers(pr)))
             w["review"] = max(w["review"], len(format_review_status(pr)))
             w["age"]    = max(w["age"],    len(format_age(pr.get("createdAt", ""))))
             w["comments"] = max(w["comments"], len(str(comment_count(pr))) + 1)
@@ -280,13 +326,18 @@ class PRWatcherApp(App):
 
         # Truly fixed columns: number, repo, author, review, age, comments
         # DataTable.Column.get_render_width() adds 2*cell_padding (default=1) to every
-        # column's width, so with 8 columns the real rendering overhead is 8*2*1 = 16.
-        NUM_COLS = 8
+        # column's width; derive the overhead from the number of columns.
+        NUM_COLS = len(mins)
         CELL_PADDING = 1  # DataTable default
-        SEPARATORS = NUM_COLS * 2 * CELL_PADDING  # = 16
+        SEPARATORS = NUM_COLS * 2 * CELL_PADDING
         fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age", "comments"))
         width = terminal_width if terminal_width is not None else self.size.width
-        remaining = max(mins["title"] + mins["labels"], width - fixed - SEPARATORS)
+        remaining = max(
+            mins["title"] + mins["labels"] + mins["reviewers"],
+            width - fixed - SEPARATORS,
+        )
+        w["reviewers"] = min(w["reviewers"], remaining - mins["title"] - mins["labels"])
+        remaining -= w["reviewers"]
 
         # Title takes only what its content needs; labels gets whatever is left (up to its cap)
         title_w  = max(mins["title"],  min(w["title"],  remaining - mins["labels"]))
@@ -335,6 +386,7 @@ class PRWatcherApp(App):
         self._col_keys["repo"]   = table.add_column("Repository",   width=22)
         self._col_keys["title"]  = table.add_column("Title",        width=48)
         self._col_keys["author"] = table.add_column("Author",       width=15)
+        self._col_keys["reviewers"] = table.add_column("Reviewers", width=30)
         self._col_keys["review"] = table.add_column("Review Status",width=16)
         self._col_keys["age"]    = table.add_column("Age",          width=5)
         self._col_keys["comments"] = table.add_column("Comments",   width=8)
@@ -500,6 +552,7 @@ class PRWatcherApp(App):
     def _rebuild_table(self) -> None:
         col_widths = self._compute_col_widths()
         table = self.query_one("#pr-table", DataTable)
+        table.tooltip = None
         table.clear()
         for pr in self._prs:
             table.add_row(
@@ -507,6 +560,7 @@ class PRWatcherApp(App):
                 ellipsis_middle(repo_short_name(pr.get("repository", "")), col_widths["repo"]),
                 pr.get("title", ""),
                 pr.get("author", {}).get("login", ""),
+                format_reviewers(pr),
                 format_review_status(pr),
                 format_age(pr.get("createdAt", "")),
                 self._comment_display(pr),
@@ -562,6 +616,26 @@ class PRWatcherApp(App):
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+
+    def on_prtable_cell_hovered(self, event: PRTable.CellHovered) -> None:
+        table = self.query_one("#pr-table", PRTable)
+        coordinate = event.coordinate
+        if coordinate is None or not table.is_valid_coordinate(coordinate):
+            table.tooltip = None
+            return
+        row_key, column_key = table.coordinate_to_cell_key(coordinate)
+        pr = self._pr_for_row_key(row_key)
+        if pr is None:
+            table.tooltip = None
+            return
+        displayed = str(table.get_cell_at(coordinate))
+        full_text = displayed
+        if column_key == self._col_keys["repo"]:
+            full_text = repo_short_name(pr.get("repository", ""))
+        elif column_key == self._col_keys["labels"]:
+            full_text = ", ".join(label["name"] for label in pr.get("labels", []))
+        clipped = full_text != displayed or cell_len(full_text) > table.columns[column_key].width
+        table.tooltip = Text(full_text) if clipped else None
 
     def action_refresh(self) -> None:
         if not self._loading:
