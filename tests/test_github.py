@@ -128,6 +128,7 @@ class TestFetchPrsForRepo:
         assert "... on Team { slug }" in query_arg
         assert "... on User { login }" in query_arg
         assert "... on Bot { login }" in query_arg
+        assert "... on Mannequin { login }" in query_arg
         assert "latestReviews(first: 100)" in query_arg
         assert query_arg == query_arg.strip()
         assert "--paginate" in command

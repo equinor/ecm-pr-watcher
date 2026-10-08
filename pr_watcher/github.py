@@ -26,6 +26,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
             requestedReviewer {
               ... on User { login }
               ... on Bot { login }
+              ... on Mannequin { login }
               ... on Team { slug }
             }
           }
