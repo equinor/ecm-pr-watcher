@@ -6,8 +6,8 @@ runs.
 
 Root cause guarded against:
     DataTable.Column.get_render_width() adds ``2 * cell_padding`` (default = 1)
-    to every column's stored width.  With 8 columns that is 16 characters of
-    rendering overhead.  The original code used ``SEPARATORS = 6``, which was 10
+    to every column's stored width.  The original 8 columns needed 16 characters
+    of rendering overhead.  The original code used ``SEPARATORS = 6``, which was 10
     characters too small, causing virtual_size.width > size.width and a
     persistent horizontal scrollbar.
 """
@@ -19,9 +19,11 @@ from unittest.mock import patch
 
 import pytest
 
+from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.events import Click, MouseScrollDown, MouseScrollUp
 from textual.widgets import Static
+from textual.widgets._tooltip import Tooltip
 
 from pr_watcher.app import PRTable, PRWatcherApp
 from pr_watcher.config import Config
@@ -37,6 +39,14 @@ MOCK_PRS = [
         "title": "feat: add widget for displaying real-time metrics dashboard",
         "repository": "Equinor/ecm-api-backend",
         "author": {"login": "alice"},
+        "reviewRequests": {"nodes": [
+            {"requestedReviewer": {"login": "bob"}},
+            {"requestedReviewer": {"slug": "ecm-wo-preparation"}},
+        ]},
+        "latestReviews": {"nodes": [
+            {"author": {"login": "bob"}, "state": "APPROVED"},
+            {"author": {"login": "charlie"}, "state": "COMMENTED"},
+        ]},
         "reviewDecision": "APPROVED",
         "isDraft": False,
         "createdAt": _iso(timedelta(days=2)),
@@ -124,6 +134,153 @@ async def test_no_horizontal_scroll_after_resize():
             )
 
 
+async def test_reviewers_column_next_to_author():
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            assert [str(column.label) for column in table.ordered_columns][3:6] == [
+                "Author", "Reviewers", "Review Status",
+            ]
+            assert table.get_cell(
+                "Equinor/ecm-api-backend#42", app._col_keys["reviewers"],
+            ) == "bob, charlie, team:ecm-wo-preparation"
+            assert table.get_cell(
+                "Equinor/ecm-iso-wp-gl0560-api-iac#41", app._col_keys["reviewers"],
+            ) == "—"
+            assert table.columns[app._col_keys["reviewers"]].width == 30
+
+            await pilot.resize_terminal(120, 30)
+            await pilot.pause(0.2)
+            assert table.columns[app._col_keys["reviewers"]].width < 30
+            assert table.virtual_size.width <= table.size.width
+
+
+@pytest.mark.parametrize("column", ["repo", "title", "author", "reviewers", "labels"])
+async def test_hover_shows_full_clipped_cell_text(column):
+    prs = deepcopy(MOCK_PRS)
+    prs[0]["repository"] = "Equinor/ecm-service-with-a-very-long-repository-name-iac"
+    prs[0]["title"] = "feat: show [literal] text " + "long title " * 15
+    prs[0]["author"] = {"login": "author-with-a-very-long-github-login"}
+    prs[0]["reviewRequests"]["nodes"].append(
+        {"requestedReviewer": {"login": "Copilot"}}
+    )
+    if column == "labels":
+        for pr in prs:
+            pr["title"] = "Short title"
+        prs[0]["labels"] = [
+            {"name": "feature-with-a-very-long-label-that-overflows-the-column"},
+            {"name": "backend"},
+        ]
+    expected = {
+        "repo": prs[0]["repository"].split("/", 1)[1],
+        "title": prs[0]["title"],
+        "author": prs[0]["author"]["login"],
+        "reviewers": "bob, charlie, team:ecm-wo-preparation",
+        "labels": ", ".join(label["name"] for label in prs[0]["labels"]),
+    }
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=prs):
+        async with app.run_test(size=(160, 40), tooltips=True) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            keys = list(app._col_keys)
+            x = sum(
+                table.columns[app._col_keys[key]].width + 2 * table.cell_padding
+                for key in keys[:keys.index(column)]
+            ) + table.cell_padding
+            await pilot.hover(table, offset=(x, 1))
+            await pilot.pause(0.6)
+            assert isinstance(table.tooltip, Text)
+            assert table.tooltip.plain == expected[column]
+            tooltip = app.screen.query_one(Tooltip)
+            assert tooltip.display
+            assert tooltip.content.plain == expected[column]
+
+            await pilot.hover(table, offset=(1, 1))
+            await pilot.pause(0.1)
+            assert table.tooltip is None
+            assert not tooltip.display
+
+            await pilot.hover(table, offset=(x, 1))
+            await pilot.pause(0.1)
+            await pilot.hover(table, offset=(x, 0))
+            await pilot.pause(0.1)
+            assert table.tooltip is None
+
+            await pilot.hover(table, offset=(x, 1))
+            await pilot.pause(0.1)
+            await pilot.hover("#app-header")
+            await pilot.pause(0.1)
+            assert table.tooltip is None
+
+
+async def test_hover_expands_summarized_labels_even_when_summary_fits():
+    prs = deepcopy(MOCK_PRS[:1])
+    prs[0]["labels"] = [{"name": name} for name in ("a", "b", "c", "d")]
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=prs):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            x = sum(
+                column.width + 2 * table.cell_padding
+                for column in table.ordered_columns[:-1]
+            ) + table.cell_padding
+            await pilot.hover(table, offset=(x, 1))
+            await pilot.pause(0.1)
+            assert table.tooltip.plain == "a, b, c, d"
+
+
+@pytest.mark.parametrize("change", ["title", "reorder", "empty"])
+async def test_refresh_clears_visible_tooltip_with_stationary_pointer(change):
+    initial_prs = deepcopy(MOCK_PRS)
+    initial_prs[0]["title"] = "Original title " * 20
+    updated_prs = deepcopy(initial_prs)
+    if change == "title":
+        updated_prs[0]["title"] = "Updated title " * 20
+    elif change == "reorder":
+        updated_prs.reverse()
+    else:
+        updated_prs = []
+
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch(
+        "pr_watcher.github.fetch_all_team_prs",
+        side_effect=[initial_prs, updated_prs],
+    ) as fetch:
+        async with app.run_test(size=(160, 40), tooltips=True) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            x = sum(
+                table.columns[app._col_keys[key]].width + 2 * table.cell_padding
+                for key in ("number", "repo")
+            ) + table.cell_padding
+            await pilot.hover(table, offset=(x, 1))
+            await pilot.pause(0.6)
+            tooltip = app.screen.query_one(Tooltip)
+            assert tooltip.display
+            assert table.tooltip.plain == initial_prs[0]["title"]
+
+            app._next_refresh = datetime.now() - timedelta(seconds=1)
+            app._tick()
+            await pilot.pause(0.5)
+
+            assert fetch.call_count == 2
+            assert table.row_count == len(updated_prs)
+            if updated_prs:
+                assert table.get_cell_at(Coordinate(0, 2)) == updated_prs[0]["title"]
+            assert table.tooltip is None
+            assert not tooltip.display
+
+            if change == "title":
+                await pilot.hover(table, offset=(x + 1, 1))
+                await pilot.pause(0.6)
+                assert tooltip.display
+                assert table.tooltip.plain == updated_prs[0]["title"]
+
+
 async def test_mouse_scroll_moves_row_cursor():
     """MouseScrollDown/Up move the row cursor instead of scrolling the viewport."""
     config = Config(org="Equinor")
@@ -196,21 +353,21 @@ async def test_comment_increase_marked_until_row_selected():
             await _run_with_mock_prs(app, pilot)
             table = app.query_one("#pr-table", PRTable)
             row_key = "Equinor/ecm-api-backend#42"
-            assert table.get_row(row_key)[6] == "1"
+            assert table.get_cell(row_key, app._col_keys["comments"]) == "1"
 
             app.action_refresh()
             await pilot.pause(0.5)
-            assert table.get_row(row_key)[6] == "2!"
+            assert table.get_cell(row_key, app._col_keys["comments"]) == "2!"
 
             app.action_refresh()
             await pilot.pause(0.5)
-            assert table.get_row(row_key)[6] == "2!"
+            assert table.get_cell(row_key, app._col_keys["comments"]) == "2!"
 
             with patch("pr_watcher.app.open_url"):
                 await pilot.press("enter")
                 await pilot.pause(0.1)
 
-            assert table.get_row(row_key)[6] == "2"
+            assert table.get_cell(row_key, app._col_keys["comments"]) == "2"
 
 
 async def test_duplicate_pr_numbers_use_repository_identity():

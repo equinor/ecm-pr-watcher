@@ -11,6 +11,7 @@ from pr_watcher.app import (
     format_age,
     format_labels,
     format_review_status,
+    format_reviewers,
     repo_short_name,
 )
 
@@ -98,6 +99,68 @@ class TestFormatLabels:
     def test_exactly_three_no_overflow(self):
         labels = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
         assert "+" not in format_labels(labels)
+
+
+class TestFormatReviewers:
+    def test_no_reviewers(self):
+        assert format_reviewers({}) == "—"
+        assert format_reviewers({
+            "reviewRequests": {"nodes": []},
+            "latestReviews": {"nodes": []},
+        }) == "—"
+
+    def test_requested_users_teams_and_submitted_reviewers(self):
+        pr = {
+            "reviewRequests": {"nodes": [
+                {"requestedReviewer": {"login": "bob"}},
+                {"requestedReviewer": {"slug": "my-team"}},
+                {"requestedReviewer": {"login": "review-bot"}},
+            ]},
+            "latestReviews": {"nodes": [
+                {"author": {"login": "bob"}, "state": "APPROVED"},
+                {"author": {"login": "Alice"}, "state": "CHANGES_REQUESTED"},
+                {"author": {"login": "bob"}, "state": "COMMENTED"},
+            ]},
+        }
+        assert format_reviewers(pr) == "Alice, bob, review-bot, team:my-team"
+
+    def test_deleted_reviewers_and_pending_reviews_are_ignored(self):
+        pr = {
+            "reviewRequests": {"nodes": [{"requestedReviewer": None}]},
+            "latestReviews": {"nodes": [
+                {"author": None, "state": "APPROVED"},
+                {"author": {"login": "alice"}, "state": "PENDING"},
+            ]},
+        }
+        assert format_reviewers(pr) == "—"
+
+    @pytest.mark.parametrize("login", [
+        "Copilot", "copilot[bot]", "copilot-pull-request-reviewer",
+        "copilot-pull-request-reviewer[bot]", "COPILOT",
+    ])
+    def test_copilot_is_excluded_from_requests_and_reviews(self, login):
+        pr = {
+            "reviewRequests": {"nodes": [{"requestedReviewer": {"login": login}}]},
+            "latestReviews": {"nodes": [
+                {"author": {"login": login}, "state": "APPROVED"},
+            ]},
+        }
+        assert format_reviewers(pr) == "—"
+
+    def test_copilot_filter_preserves_other_reviewers_and_teams(self):
+        pr = {
+            "reviewRequests": {"nodes": [
+                {"requestedReviewer": {"login": "Copilot"}},
+                {"requestedReviewer": {"slug": "copilot"}},
+                {"requestedReviewer": {"login": "copilot-tools-user"}},
+            ]},
+            "latestReviews": {"nodes": [
+                {"author": {"login": "copilot-pull-request-reviewer"}, "state": "COMMENTED"},
+                {"author": {"login": "alice"}, "state": "APPROVED"},
+                {"author": {"login": "other-bot"}, "state": "COMMENTED"},
+            ]},
+        }
+        assert format_reviewers(pr) == "alice, copilot-tools-user, other-bot, team:copilot"
 
 
 # ---------------------------------------------------------------------------

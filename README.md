@@ -76,6 +76,19 @@ python main.py --org Equinor --team-slug ecm-wo-preparation
 | `↑` / `↓` | Navigate the PR list |
 | `Ctrl+C` | Quit the application |
 
+Hover over clipped table cells to see their full text in a tooltip, including
+repository names, titles, authors, reviewers, and labels. This requires a terminal
+with mouse-motion support, such as Windows Terminal.
+
+## Reviewers
+
+The **Reviewers** column beside **Author** shows requested reviewers and people
+who have already submitted a review, with duplicate names removed. Requested
+teams appear as `team:<slug>`. PRs without reviewers show `—`.
+Copilot reviewers are excluded from this column.
+The column is capped at 30 characters and shrinks on narrower terminals to
+preserve space for the title.
+
 ## Configuration
 
 All configuration is passed via CLI flags (see above). No config file is required.
