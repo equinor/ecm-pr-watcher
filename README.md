@@ -47,7 +47,7 @@ python main.py --org <GITHUB_ORG>
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--org ORG` | *(required)* | GitHub organisation name |
+| `--org ORG` | *(required unless configured in the file)* | GitHub organisation name |
 | `--team NAME` | `"ECM WO Preparation"` | GitHub team display name |
 | `--team-slug SLUG` | *(derived from `--team`)* | GitHub team slug — auto-derived if omitted |
 | `--interval SECONDS` | `60` | Auto-refresh interval in seconds |
@@ -91,14 +91,25 @@ preserve space for the title.
 
 ## Configuration
 
-Connection and refresh options are passed via CLI flags (see above). Display preferences can optionally be set in a local `pr-watcher.json` file in the repository root. This file is ignored by git, and the app runs with defaults when it is missing. To get started, copy `pr-watcher.example.json`:
+All CLI options and display preferences can be set in a local `pr-watcher.json` file in the repository root. Command-line flags override the corresponding file settings; omitted settings use the defaults above. This file is ignored by git. If it is missing, pass at least `--org` on the command line. To get started, copy `pr-watcher.example.json`:
 
 ```bash
 cp pr-watcher.example.json pr-watcher.json
 ```
 
+The example uses the options from the `--org Equinor --team "My Team" --interval 30 --no-bell` command above, with the corresponding team slug and priority sorting. Replace the team name and slug with your team's values. Once `org` is configured, launch without any arguments:
+
+```bash
+python main.py
+```
+
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `org` | *(required in the file or via `--org`)* | GitHub organisation name |
+| `team` | `"ECM WO Preparation"` | GitHub team display name |
+| `team_slug` | *(derived from `team`)* | GitHub team slug; omitted or empty values are auto-derived |
+| `interval` | `60` | Auto-refresh interval in seconds (integer), corresponding to `--interval` |
+| `bell` | `true` | Ring terminal bell when new PRs appear; use `false` for `--no-bell` |
 | `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
 
 The app refuses to start if the file contains invalid JSON, unknown settings, or wrong value types.
