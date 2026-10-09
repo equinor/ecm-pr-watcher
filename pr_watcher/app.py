@@ -135,6 +135,25 @@ def format_review_status(pr: dict) -> str:
     }.get(decision, "— No Reviews")
 
 
+def pr_priority(pr: dict) -> int:
+    """Rank for the priority sort; lower values are shown first."""
+    if pr.get("isDraft"):
+        return 4
+    decision = pr.get("reviewDecision")
+    if decision == "APPROVED":
+        return 3
+    if decision == "CHANGES_REQUESTED":
+        return 2
+    return 1 if reviewer_names(pr) else 0
+
+
+def order_prs(prs: list[dict], sort: str) -> list[dict]:
+    """Return PRs in display order; "created" keeps the newest-first fetch order."""
+    if sort != "priority":
+        return list(prs)
+    return sorted(prs, key=lambda pr: (pr_priority(pr), pr.get("createdAt", "")))
+
+
 def format_labels(labels: list[dict]) -> str:
     if not labels:
         return ""
@@ -145,8 +164,8 @@ def format_labels(labels: list[dict]) -> str:
     return result
 
 
-def format_reviewers(pr: dict) -> str:
-    """Combine requested users/teams and submitted reviewers without duplicates."""
+def reviewer_names(pr: dict) -> set[str]:
+    """Requested users/teams and submitted reviewers, excluding Copilot."""
     names: set[str] = set()
     for request in pr.get("reviewRequests", {}).get("nodes", []):
         reviewer = request.get("requestedReviewer") or {}
@@ -158,8 +177,12 @@ def format_reviewers(pr: dict) -> str:
         author = review.get("author") or {}
         if review.get("state") != "PENDING" and author.get("login"):
             names.add(author["login"])
-    names = {name for name in names if name.casefold() not in _COPILOT_REVIEWER_LOGINS}
-    return ", ".join(sorted(names, key=str.casefold)) or "—"
+    return {name for name in names if name.casefold() not in _COPILOT_REVIEWER_LOGINS}
+
+
+def format_reviewers(pr: dict) -> str:
+    """Combine requested users/teams and submitted reviewers without duplicates."""
+    return ", ".join(sorted(reviewer_names(pr), key=str.casefold)) or "—"
 
 
 def comment_count(pr: dict) -> int:
@@ -459,7 +482,7 @@ class PRWatcherApp(App):
             )
             self._comment_counts = new_comment_counts
             self._known_prs = new_identities
-            self._prs = new_prs
+            self._prs = order_prs(new_prs, self.config.sort)
             self._error = None
             self._loading = False
             self._last_updated = datetime.now()

@@ -12,3 +12,4 @@ env/
 .env
 *.log
 .DS_Store
+pr-watcher.json

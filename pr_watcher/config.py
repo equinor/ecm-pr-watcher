@@ -2,8 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+
+SETTINGS_FILE = Path(__file__).resolve().parent.parent / "pr-watcher.json"
+_SETTING_TYPES: dict[str, type] = {"sort": str}
+_SETTING_CHOICES: dict[str, tuple[str, ...]] = {"sort": ("created", "priority")}
 
 
 @dataclass
@@ -13,6 +19,7 @@ class Config:
     team_slug: str = ""
     refresh_interval: int = 60
     bell: bool = True
+    sort: str = "created"
 
     def __post_init__(self) -> None:
         if not self.team_slug:
@@ -24,6 +31,31 @@ def to_slug(name: str) -> str:
     s = name.lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-")
+
+
+def load_settings(path: Path = SETTINGS_FILE) -> dict:
+    """Read optional local settings; a missing file means defaults."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}: invalid JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a JSON object")
+    for key, value in data.items():
+        expected = _SETTING_TYPES.get(key)
+        if expected is None:
+            allowed = ", ".join(sorted(_SETTING_TYPES))
+            raise ValueError(f"{path}: unknown setting '{key}' (allowed: {allowed})")
+        if not isinstance(value, expected):
+            raise ValueError(f"{path}: '{key}' must be {expected.__name__}")
+        choices = _SETTING_CHOICES.get(key)
+        if choices and value not in choices:
+            raise ValueError(f"{path}: '{key}' must be one of: {', '.join(choices)}")
+    return data
 
 
 def parse_args() -> Config:
@@ -73,10 +105,15 @@ def parse_args() -> Config:
     )
 
     args = parser.parse_args()
+    try:
+        settings = load_settings()
+    except ValueError as exc:
+        parser.error(str(exc))
     return Config(
         org=args.org,
         team=args.team,
         team_slug=args.team_slug,
         refresh_interval=args.refresh_interval,
         bell=args.bell,
+        **settings,
     )
