@@ -5,7 +5,26 @@ import json
 
 import pytest
 
-from pr_watcher.config import Config, load_settings, to_slug
+from pr_watcher import config as config_module
+from pr_watcher.config import Config, load_settings, parse_args, to_slug
+
+
+class TestParseArgs:
+    def test_loaded_settings_reach_config(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["pr-watcher", "--org", "Equinor"])
+        monkeypatch.setattr(config_module, "load_settings", lambda: {"sort": "priority"})
+        assert parse_args().sort == "priority"
+
+    def test_invalid_settings_stop_startup(self, monkeypatch, capsys):
+        def broken() -> dict:
+            raise ValueError("pr-watcher.json: unknown setting 'x'")
+
+        monkeypatch.setattr("sys.argv", ["pr-watcher", "--org", "Equinor"])
+        monkeypatch.setattr(config_module, "load_settings", broken)
+        with pytest.raises(SystemExit) as exc:
+            parse_args()
+        assert exc.value.code == 2
+        assert "unknown setting 'x'" in capsys.readouterr().err
 
 
 class TestToSlug:
