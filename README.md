@@ -91,7 +91,17 @@ preserve space for the title.
 
 ## Configuration
 
-All configuration is passed via CLI flags (see above). No config file is required.
+Connection and refresh options are passed via CLI flags (see above). Display preferences can optionally be set in a local `pr-watcher.json` file in the repository root. This file is ignored by git, and the app runs with defaults when it is missing. To get started, copy `pr-watcher.example.json`:
+
+```bash
+cp pr-watcher.example.json pr-watcher.json
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
+
+The app refuses to start if the file contains invalid JSON, unknown settings, or wrong value types.
 
 **How the app works:**
 

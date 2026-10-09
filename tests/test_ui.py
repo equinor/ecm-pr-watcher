@@ -319,6 +319,40 @@ async def test_middle_click_opens_url():
             mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
 
 
+async def test_priority_sort_orders_rows_and_opens_matching_pr():
+    """With sort=priority, rows follow the priority tiers and Enter opens the matching PR."""
+    draft = {
+        **deepcopy(MOCK_PRS[1]),
+        "number": 7,
+        "isDraft": True,
+        "createdAt": _iso(timedelta(days=30)),
+        "url": "https://github.com/Equinor/ecm-iso-wp-gl0560-api-iac/pull/7",
+    }
+    reviewed = {
+        **deepcopy(MOCK_PRS[1]),
+        "number": 8,
+        "reviewRequests": {"nodes": [{"requestedReviewer": {"login": "dave"}}]},
+        "createdAt": _iso(timedelta(days=10)),
+        "url": "https://github.com/Equinor/ecm-iso-wp-gl0560-api-iac/pull/8",
+    }
+    prs = [MOCK_PRS[2], MOCK_PRS[0], MOCK_PRS[1], reviewed, draft]
+    config = Config(org="Equinor", sort="priority")
+    app = PRWatcherApp(config)
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=prs):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            expected = [MOCK_PRS[1], reviewed, MOCK_PRS[2], MOCK_PRS[0], draft]
+            assert [row.key.value for row in table.ordered_rows] == [
+                app._row_key(pr) for pr in expected
+            ]
+
+            table.move_cursor(row=3)
+            with patch("pr_watcher.app.open_url") as mock_open:
+                app.action_open_pr()
+            mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
+
+
 async def test_rapid_duplicate_opens_are_debounced():
     """Rapid open events for the same PR open only one browser tab."""
     config = Config(org="Equinor")

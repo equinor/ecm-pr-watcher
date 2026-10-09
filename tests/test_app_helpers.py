@@ -12,8 +12,90 @@ from pr_watcher.app import (
     format_labels,
     format_review_status,
     format_reviewers,
+    order_prs,
+    pr_priority,
     repo_short_name,
 )
+
+
+def _pr(
+    number: int,
+    decision: str | None = "REVIEW_REQUIRED",
+    *,
+    draft: bool = False,
+    created: str = "2026-01-01T00:00:00Z",
+    requested: list[dict] | None = None,
+    reviews: list[dict] | None = None,
+) -> dict:
+    return {
+        "number": number,
+        "reviewDecision": decision,
+        "isDraft": draft,
+        "createdAt": created,
+        "reviewRequests": {"nodes": [{"requestedReviewer": r} for r in requested or []]},
+        "latestReviews": {"nodes": reviews or []},
+    }
+
+
+class TestPrPriority:
+    @pytest.mark.parametrize("decision", ["REVIEW_REQUIRED", None])
+    def test_needs_review_without_reviewers_is_first(self, decision):
+        assert pr_priority(_pr(1, decision)) == 0
+
+    @pytest.mark.parametrize("decision", ["REVIEW_REQUIRED", None])
+    def test_needs_review_with_requested_user(self, decision):
+        assert pr_priority(_pr(1, decision, requested=[{"login": "alice"}])) == 1
+
+    def test_team_request_counts_as_reviewer(self):
+        assert pr_priority(_pr(1, requested=[{"slug": "wo-prep"}])) == 1
+
+    def test_submitted_review_counts_as_reviewer(self):
+        reviews = [{"author": {"login": "bob"}, "state": "COMMENTED"}]
+        assert pr_priority(_pr(1, reviews=reviews)) == 1
+
+    def test_copilot_only_counts_as_no_reviewers(self):
+        pr = _pr(
+            1,
+            requested=[{"login": "Copilot"}],
+            reviews=[{"author": {"login": "copilot-pull-request-reviewer"}, "state": "COMMENTED"}],
+        )
+        assert pr_priority(pr) == 0
+
+    def test_pending_review_is_not_a_reviewer(self):
+        reviews = [{"author": {"login": "bob"}, "state": "PENDING"}]
+        assert pr_priority(_pr(1, reviews=reviews)) == 0
+
+    def test_changes_requested(self):
+        assert pr_priority(_pr(1, "CHANGES_REQUESTED")) == 2
+
+    def test_approved(self):
+        assert pr_priority(_pr(1, "APPROVED")) == 3
+
+    @pytest.mark.parametrize("decision", ["APPROVED", "REVIEW_REQUIRED", "CHANGES_REQUESTED", None])
+    def test_draft_is_last_regardless_of_decision(self, decision):
+        assert pr_priority(_pr(1, decision, draft=True)) == 4
+
+
+class TestOrderPrs:
+    PRS = [
+        _pr(1, "APPROVED", created="2026-01-05T00:00:00Z"),
+        _pr(2, "REVIEW_REQUIRED", created="2026-01-04T00:00:00Z", requested=[{"login": "a"}]),
+        _pr(3, None, draft=True, created="2026-01-03T00:00:00Z"),
+        _pr(4, "CHANGES_REQUESTED", created="2026-01-02T00:00:00Z"),
+        _pr(5, "REVIEW_REQUIRED", created="2026-01-01T12:00:00Z"),
+        _pr(6, None, created="2026-01-01T00:00:00Z"),
+    ]
+
+    def test_created_keeps_fetch_order(self):
+        assert [pr["number"] for pr in order_prs(self.PRS, "created")] == [1, 2, 3, 4, 5, 6]
+
+    def test_priority_orders_by_tier_then_oldest_first(self):
+        assert [pr["number"] for pr in order_prs(self.PRS, "priority")] == [6, 5, 2, 4, 1, 3]
+
+    def test_does_not_mutate_input(self):
+        prs = list(self.PRS)
+        order_prs(prs, "priority")
+        assert prs == self.PRS
 
 
 # ---------------------------------------------------------------------------

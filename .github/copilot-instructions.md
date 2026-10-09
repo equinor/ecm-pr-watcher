@@ -13,7 +13,7 @@
 ```
 pr_watcher/
   app.py       # PRWatcherApp — Textual App subclass, all UI logic
-  config.py    # Config dataclass + argparse (--org, --team, --team-slug, --interval, --bell)
+  config.py    # Config dataclass + argparse (--org, --team, --team-slug, --interval, --bell) + optional git-ignored pr-watcher.json
   github.py    # gh CLI wrapper: fetch team repos + concurrent PR fetching
 main.py        # thin entry point
 requirements.txt
