@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SETTINGS_FILE = Path(__file__).resolve().parent.parent / "pr-watcher.json"
-_SETTING_TYPES: dict[str, type] = {"sort": str}
+_SETTING_TYPES: dict[str, type] = {
+    "org": str,
+    "team": str,
+    "team_slug": str,
+    "interval": int,
+    "bell": bool,
+    "sort": str,
+}
 _SETTING_CHOICES: dict[str, tuple[str, ...]] = {"sort": ("created", "priority")}
 
 
@@ -50,7 +57,7 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
         if expected is None:
             allowed = ", ".join(sorted(_SETTING_TYPES))
             raise ValueError(f"{path}: unknown setting '{key}' (allowed: {allowed})")
-        if not isinstance(value, expected):
+        if type(value) is not expected:
             raise ValueError(f"{path}: '{key}' must be {expected.__name__}")
         choices = _SETTING_CHOICES.get(key)
         if choices and value not in choices:
@@ -63,6 +70,7 @@ def parse_args() -> Config:
         prog="pr-watcher",
         description="TUI for monitoring GitHub team Pull Requests",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        argument_default=argparse.SUPPRESS,
         epilog=(
             "Examples:\n"
             "  python main.py --org my-company\n"
@@ -72,19 +80,16 @@ def parse_args() -> Config:
     )
     parser.add_argument(
         "--org",
-        required=True,
         metavar="ORG",
-        help="GitHub organization name (required)",
+        help="GitHub organization name (required unless set in pr-watcher.json)",
     )
     parser.add_argument(
         "--team",
-        default="ECM WO Preparation",
         metavar="NAME",
         help='GitHub team display name (default: "ECM WO Preparation")',
     )
     parser.add_argument(
         "--team-slug",
-        default="",
         dest="team_slug",
         metavar="SLUG",
         help="GitHub team slug — auto-derived from --team if not provided",
@@ -92,7 +97,6 @@ def parse_args() -> Config:
     parser.add_argument(
         "--interval",
         type=int,
-        default=60,
         dest="refresh_interval",
         metavar="SECONDS",
         help="Auto-refresh interval in seconds (default: 60)",
@@ -100,7 +104,6 @@ def parse_args() -> Config:
     parser.add_argument(
         "--bell",
         action=argparse.BooleanOptionalAction,
-        default=True,
         help="Ring terminal bell when new PRs appear (default: on). Use --no-bell to disable.",
     )
 
@@ -109,11 +112,9 @@ def parse_args() -> Config:
         settings = load_settings()
     except ValueError as exc:
         parser.error(str(exc))
-    return Config(
-        org=args.org,
-        team=args.team,
-        team_slug=args.team_slug,
-        refresh_interval=args.refresh_interval,
-        bell=args.bell,
-        **settings,
-    )
+    if "interval" in settings:
+        settings["refresh_interval"] = settings.pop("interval")
+    settings.update(vars(args))
+    if not settings.get("org", "").strip():
+        parser.error("the following arguments are required: --org (or 'org' in pr-watcher.json)")
+    return Config(**settings)
