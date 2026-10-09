@@ -115,6 +115,6 @@ def parse_args() -> Config:
     if "interval" in settings:
         settings["refresh_interval"] = settings.pop("interval")
     settings.update(vars(args))
-    if "org" not in settings:
+    if not settings.get("org", "").strip():
         parser.error("the following arguments are required: --org (or 'org' in pr-watcher.json)")
     return Config(**settings)
