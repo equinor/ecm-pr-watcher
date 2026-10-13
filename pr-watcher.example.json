@@ -1,4 +1,9 @@
 {
+  "org": "Equinor",
+  "team": "My Team",
+  "team_slug": "my-team",
+  "interval": 30,
+  "bell": false,
   "sort": "priority",
   "ignore_days": 14
 }

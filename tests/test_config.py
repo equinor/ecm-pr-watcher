@@ -10,6 +10,129 @@ from pr_watcher.config import Config, load_settings, parse_args, to_slug
 
 
 class TestParseArgs:
+    @pytest.fixture(autouse=True)
+    def default_args_and_settings(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["pr-watcher"])
+        monkeypatch.setattr(config_module, "load_settings", lambda: {})
+
+    def test_cli_only_uses_existing_defaults(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["pr-watcher", "--org", "Equinor"])
+        assert parse_args() == Config(org="Equinor")
+
+    def test_file_only_configures_all_options(self, monkeypatch):
+        monkeypatch.setattr(
+            config_module,
+            "load_settings",
+            lambda: {
+                "org": "Equinor",
+                "team": "My Team",
+                "team_slug": "custom-slug",
+                "interval": 30,
+                "bell": False,
+                "sort": "priority",
+            },
+        )
+        assert parse_args() == Config(
+            org="Equinor",
+            team="My Team",
+            team_slug="custom-slug",
+            refresh_interval=30,
+            bell=False,
+            sort="priority",
+        )
+
+    def test_org_only_in_file_uses_existing_defaults(self, monkeypatch):
+        monkeypatch.setattr(config_module, "load_settings", lambda: {"org": "Equinor"})
+        assert parse_args() == Config(org="Equinor")
+
+    def test_cli_options_override_file_settings(self, monkeypatch):
+        monkeypatch.setattr(
+            config_module,
+            "load_settings",
+            lambda: {
+                "org": "configured-org",
+                "team": "Configured Team",
+                "team_slug": "configured-slug",
+                "interval": 120,
+                "bell": True,
+                "sort": "priority",
+            },
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "pr-watcher", "--org", "Equinor", "--team", "My Team",
+                "--team-slug", "my-team", "--interval", "30", "--no-bell",
+            ],
+        )
+        assert parse_args() == Config(
+            org="Equinor",
+            team="My Team",
+            team_slug="my-team",
+            refresh_interval=30,
+            bell=False,
+            sort="priority",
+        )
+
+    @pytest.mark.parametrize(
+        ("configured_bell", "flag", "expected"),
+        [(False, "--bell", True), (True, "--no-bell", False)],
+    )
+    def test_cli_bell_overrides_file(self, monkeypatch, configured_bell, flag, expected):
+        monkeypatch.setattr(
+            config_module, "load_settings",
+            lambda: {"org": "Equinor", "bell": configured_bell},
+        )
+        monkeypatch.setattr("sys.argv", ["pr-watcher", flag])
+        assert parse_args().bell is expected
+
+    def test_cli_team_overrides_file_and_derives_slug(self, monkeypatch):
+        monkeypatch.setattr(
+            config_module, "load_settings",
+            lambda: {"org": "Equinor", "team": "Configured Team"},
+        )
+        monkeypatch.setattr("sys.argv", ["pr-watcher", "--team", "CLI Team"])
+        assert parse_args().team_slug == "cli-team"
+
+    def test_explicit_file_slug_is_preserved_when_cli_overrides_team(self, monkeypatch):
+        monkeypatch.setattr(
+            config_module, "load_settings",
+            lambda: {"org": "Equinor", "team_slug": "custom-slug"},
+        )
+        monkeypatch.setattr("sys.argv", ["pr-watcher", "--team", "CLI Team"])
+        assert parse_args().team_slug == "custom-slug"
+
+    def test_missing_org_stops_startup(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            parse_args()
+        assert exc.value.code == 2
+        assert "--org" in capsys.readouterr().err
+
+    def test_help_does_not_require_org_or_load_settings(self, monkeypatch, capsys):
+        def broken() -> dict:
+            raise ValueError("invalid settings")
+
+        monkeypatch.setattr("sys.argv", ["pr-watcher", "--help"])
+        monkeypatch.setattr(config_module, "load_settings", broken)
+        with pytest.raises(SystemExit) as exc:
+            parse_args()
+        assert exc.value.code == 0
+        assert "--org" in capsys.readouterr().out
+
+    def test_example_file_matches_cli_example(self, monkeypatch):
+        example = config_module.SETTINGS_FILE.with_name("pr-watcher.example.json")
+        monkeypatch.setattr(config_module, "load_settings", lambda: load_settings(example))
+        from_file = parse_args()
+        monkeypatch.setattr(config_module, "load_settings", lambda: {"sort": "priority"})
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "pr-watcher", "--org", "Equinor", "--team", "My Team",
+                "--interval", "30", "--no-bell",
+            ],
+        )
+        assert from_file == parse_args()
+
     def test_loaded_settings_reach_config(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["pr-watcher", "--org", "Equinor"])
         monkeypatch.setattr(config_module, "load_settings", lambda: {"sort": "priority"})
@@ -69,7 +192,7 @@ class TestLoadSettings:
     def test_missing_file_returns_defaults(self, tmp_path):
         assert load_settings(tmp_path / "pr-watcher.json") == {}
 
-    @pytest.mark.parametrize("sort", ["created", "priority"])
+    @pytest.mark.parametrize("sort", ["created", "priority", "updated"])
     def test_reads_sort(self, tmp_path, sort):
         path = tmp_path / "pr-watcher.json"
         path.write_text(json.dumps({"sort": sort}), encoding="utf-8")
@@ -87,6 +210,23 @@ class TestLoadSettings:
         assert load_settings(path) == {"ignore_days": days}
 
     @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("org", "Equinor"),
+            ("team", "My Team"),
+            ("team_slug", "my-team"),
+            ("interval", 30),
+            ("bell", True),
+            ("bell", False),
+        ],
+    )
+    def test_reads_cli_settings(self, tmp_path, key, value):
+        path = tmp_path / "pr-watcher.json"
+        settings = {key: value}
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        assert load_settings(path) == settings
+
+    @pytest.mark.parametrize(
         ("content", "message"),
         [
             ("{not json", "invalid JSON"),
@@ -94,13 +234,21 @@ class TestLoadSettings:
             ('{"approved_last": true}', "unknown setting"),
             ('{"state_file": "x.json"}', "unknown setting"),
             ('{"sort": 1}', "must be str"),
-            ('{"sort": "oldest"}', "must be one of: created, priority"),
+            ('{"sort": "oldest"}', "must be one of: created, priority, updated"),
             ('{"ignore_days": 0}', "must be at least 1"),
             ('{"ignore_days": -1}', "must be at least 1"),
             ('{"ignore_days": 3651}', "must be at most 3650"),
             ('{"ignore_days": true}', "must be int"),
             ('{"ignore_days": "14"}', "must be int"),
             ('{"ignore_days": 1.5}', "must be int"),
+            ('{"org": 1}', "must be str"),
+            ('{"team": false}', "must be str"),
+            ('{"team_slug": []}', "must be str"),
+            ('{"interval": "30"}', "must be int"),
+            ('{"interval": 30.5}', "must be int"),
+            ('{"interval": true}', "must be int"),
+            ('{"bell": "false"}', "must be bool"),
+            ('{"bell": 0}', "must be bool"),
         ],
     )
     def test_invalid_content_raises(self, tmp_path, content, message):
@@ -113,4 +261,12 @@ class TestLoadSettings:
         from pr_watcher.config import SETTINGS_FILE
 
         example = SETTINGS_FILE.with_name("pr-watcher.example.json")
-        assert load_settings(example) == {"sort": "priority", "ignore_days": 14}
+        assert load_settings(example) == {
+            "org": "Equinor",
+            "team": "My Team",
+            "team_slug": "my-team",
+            "interval": 30,
+            "bell": False,
+            "sort": "priority",
+            "ignore_days": 14,
+        }

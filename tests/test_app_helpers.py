@@ -24,6 +24,7 @@ def _pr(
     *,
     draft: bool = False,
     created: str = "2026-01-01T00:00:00Z",
+    updated: str | None = None,
     requested: list[dict] | None = None,
     reviews: list[dict] | None = None,
 ) -> dict:
@@ -32,6 +33,7 @@ def _pr(
         "reviewDecision": decision,
         "isDraft": draft,
         "createdAt": created,
+        "updatedAt": updated or created,
         "reviewRequests": {"nodes": [{"requestedReviewer": r} for r in requested or []]},
         "latestReviews": {"nodes": reviews or []},
     }
@@ -91,6 +93,14 @@ class TestOrderPrs:
 
     def test_priority_orders_by_tier_then_oldest_first(self):
         assert [pr["number"] for pr in order_prs(self.PRS, "priority")] == [6, 5, 2, 4, 1, 3]
+
+    def test_updated_orders_most_recent_change_first(self):
+        prs = [
+            _pr(1, updated="2026-01-05T00:00:00Z"),
+            _pr(2, updated="2026-01-07T00:00:00Z"),
+            _pr(3, updated="2026-01-06T00:00:00Z"),
+        ]
+        assert [pr["number"] for pr in order_prs(prs, "updated")] == [2, 3, 1]
 
     def test_does_not_mutate_input(self):
         prs = list(self.PRS)
