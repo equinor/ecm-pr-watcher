@@ -89,6 +89,13 @@ Copilot reviewers are excluded from this column.
 The column is capped at 30 characters and shrinks on narrower terminals to
 preserve space for the title.
 
+## Last change
+
+The **Last change** column shows how long it has been since GitHub last updated
+the PR, using the same minute/hour/day/week/month granularity as **Age**. This
+timestamp reflects PR activity such as commits, comments, reviews, and metadata
+changes.
+
 ## Configuration
 
 All CLI options and display preferences can be set in a local `pr-watcher.json` file in the repository root. Command-line flags override the corresponding file settings; omitted settings use the defaults above. This file is ignored by git. If it is missing, pass at least `--org` on the command line. To get started, copy `pr-watcher.example.json`:
@@ -110,7 +117,7 @@ python main.py
 | `team_slug` | *(derived from `team`)* | GitHub team slug; omitted or empty values are auto-derived |
 | `interval` | `60` | Auto-refresh interval in seconds (integer), corresponding to `--interval` |
 | `bell` | `true` | Ring terminal bell when new PRs appear; use `false` for `--no-bell` |
-| `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
+| `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"updated"` shows the most recently changed PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
 
 The app refuses to start if the file contains invalid JSON, unknown settings, or wrong value types.
 

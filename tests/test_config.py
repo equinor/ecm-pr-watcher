@@ -188,7 +188,7 @@ class TestLoadSettings:
     def test_missing_file_returns_defaults(self, tmp_path):
         assert load_settings(tmp_path / "pr-watcher.json") == {}
 
-    @pytest.mark.parametrize("sort", ["created", "priority"])
+    @pytest.mark.parametrize("sort", ["created", "priority", "updated"])
     def test_reads_sort(self, tmp_path, sort):
         path = tmp_path / "pr-watcher.json"
         path.write_text(json.dumps({"sort": sort}), encoding="utf-8")
@@ -223,7 +223,7 @@ class TestLoadSettings:
             ("[]", "expected a JSON object"),
             ('{"approved_last": true}', "unknown setting"),
             ('{"sort": 1}', "must be str"),
-            ('{"sort": "oldest"}', "must be one of: created, priority"),
+            ('{"sort": "oldest"}', "must be one of: created, priority, updated"),
             ('{"org": 1}', "must be str"),
             ('{"team": false}', "must be str"),
             ('{"team_slug": []}', "must be str"),

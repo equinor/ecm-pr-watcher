@@ -124,6 +124,7 @@ class TestFetchPrsForRepo:
         command = run.call_args.args[0]
         query_arg = next(arg for arg in command if arg.startswith("query="))
         assert "totalCommentsCount" in query_arg
+        assert "updatedAt" in query_arg
         assert "reviewRequests(first: 100)" in query_arg
         assert "... on Team { slug }" in query_arg
         assert "... on User { login }" in query_arg
