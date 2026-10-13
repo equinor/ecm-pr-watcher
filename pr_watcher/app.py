@@ -355,18 +355,27 @@ class PRWatcherApp(App):
         # DataTable.Column.get_render_width() adds 2*cell_padding (default=1) to every
         # column's width; derive the overhead from the number of columns.
         NUM_COLS = len(mins)
-        CELL_PADDING = 1  # DataTable default
-        SEPARATORS = NUM_COLS * 2 * CELL_PADDING
+        DEFAULT_CELL_PADDING = 1
         flexible_keys = ("title", "labels", "reviewers")
+        shrinkable_fixed_keys = ("repo", "author", "review")
         fixed_keys = ("number", "repo", "author", "review", "age", "updated", "comments")
         fixed = sum(w[k] for k in fixed_keys)
         width = terminal_width if terminal_width is not None else self.size.width
-        content_width = max(sum(mins.values()), width - SEPARATORS)
         flexible_min = sum(mins[k] for k in flexible_keys)
+        minimum_fixed = sum(
+            mins[k] if k in shrinkable_fixed_keys else w[k] for k in fixed_keys
+        )
+        minimum_content = minimum_fixed + flexible_min
+        default_separators = NUM_COLS * 2 * DEFAULT_CELL_PADDING
+        cell_padding = (
+            0 if width < minimum_content + default_separators else DEFAULT_CELL_PADDING
+        )
+        separators = NUM_COLS * 2 * cell_padding
+        content_width = max(minimum_content, width - separators)
 
         # Repository, author, and review cells can be clipped with tooltip support.
         overflow = max(0, fixed + flexible_min - content_width)
-        for key in ("repo", "author", "review"):
+        for key in shrinkable_fixed_keys:
             reduction = min(overflow, w[key] - mins[key])
             w[key] -= reduction
             overflow -= reduction
@@ -388,10 +397,17 @@ class PRWatcherApp(App):
         w["labels"] = labels_w
         return w
 
-    def _apply_col_widths(self, widths: dict[str, int]) -> None:
+    def _apply_col_widths(
+        self,
+        widths: dict[str, int],
+        terminal_width: int | None = None,
+    ) -> None:
         if not self._col_keys:
             return
         table = self.query_one("#pr-table", DataTable)
+        width = terminal_width if terminal_width is not None else self.size.width
+        default_render_width = sum(widths.values()) + len(widths) * 2
+        table.cell_padding = 0 if default_render_width > width else 1
         for key, col_key in self._col_keys.items():
             if key in widths:
                 table.columns[col_key].width = widths[key]
@@ -402,7 +418,10 @@ class PRWatcherApp(App):
         """On terminal resize: recompute all widths (keeps content-fit, adjusts title)."""
         if not self._col_keys:
             return
-        self._apply_col_widths(self._compute_col_widths(terminal_width=terminal_width))
+        self._apply_col_widths(
+            self._compute_col_widths(terminal_width=terminal_width),
+            terminal_width=terminal_width,
+        )
 
     def on_resize(self, event: Resize) -> None:
         self._update_title_col_width(terminal_width=event.size.width)

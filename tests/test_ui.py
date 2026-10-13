@@ -104,18 +104,20 @@ async def test_no_horizontal_scroll():
             )
 
 
-async def test_no_horizontal_scroll_narrow_terminal():
-    """Column widths adapt correctly on a narrower (120-column) terminal."""
+@pytest.mark.parametrize("width", [80, 120])
+async def test_no_horizontal_scroll_narrow_terminal(width):
+    """Column widths adapt correctly on narrow terminals."""
     config = Config(org="Equinor")
     app = PRWatcherApp(config)
     with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(width, 30)) as pilot:
             await _run_with_mock_prs(app, pilot)
             table = app.query_one("#pr-table")
             assert table.virtual_size.width <= table.size.width, (
-                f"Horizontal overflow at 120 cols: virtual={table.virtual_size.width}, "
+                f"Horizontal overflow at {width} cols: virtual={table.virtual_size.width}, "
                 f"visible={table.size.width}"
             )
+            assert table.cell_padding == (0 if width == 80 else 1)
 
 
 async def test_no_horizontal_scroll_after_resize():
@@ -126,14 +128,15 @@ async def test_no_horizontal_scroll_after_resize():
         async with app.run_test(size=(220, 40)) as pilot:
             await _run_with_mock_prs(app, pilot)
 
-            await pilot.resize_terminal(160, 40)
+            await pilot.resize_terminal(80, 40)
             await pilot.pause(0.2)
 
             table = app.query_one("#pr-table")
             assert table.virtual_size.width <= table.size.width, (
-                f"Horizontal overflow after resize to 160: virtual={table.virtual_size.width}, "
+                f"Horizontal overflow after resize to 80: virtual={table.virtual_size.width}, "
                 f"visible={table.size.width}"
             )
+            assert table.cell_padding == 0
 
 
 async def test_reviewers_column_next_to_author():
