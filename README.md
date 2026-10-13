@@ -74,10 +74,10 @@ python main.py --org Equinor --team-slug ecm-wo-preparation
 | `r` | Force an immediate refresh |
 | `Enter` | Open the selected PR in the default browser |
 | `i` | Ignore the selected PR for `ignore_days` days. In the ignored view the footer label changes to **Restore PR** and `i` restores it |
-
-Click **🙈 N ignored** in the status bar to switch to the ignored-PRs view (the Age column shows when each ignore ends); click it again to go back.
 | `↑` / `↓` | Navigate the PR list |
 | `Ctrl+C` | Quit the application |
+
+Click **🙈 N ignored** in the status bar to switch to the ignored-PRs view (the Age column shows when each ignore ends); click it again to go back.
 
 Hover over clipped table cells to see their full text in a tooltip, including
 repository names, titles, authors, reviewers, and labels. This requires a terminal

@@ -295,8 +295,8 @@ class PRWatcherApp(App):
         self._prs: list[dict] = []
         self._visible_prs: list[dict] = []
         self._show_ignored: bool = False
-        ignores, self._ignore_warning = load_ignores(config.state_file)
-        self._ignores = prune_expired(ignores, datetime.now(timezone.utc))
+        # Expired entries are pruned (and saved) by the first _rebuild_table().
+        self._ignores, self._ignore_warning = load_ignores(config.state_file)
         self._known_prs: set[tuple[str, int]] = set()
         self._comment_counts: dict[tuple[str, int], int] = {}
         self._unread_comment_updates: set[tuple[str, int]] = set()

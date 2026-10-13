@@ -578,6 +578,8 @@ async def test_existing_ignores_load_and_expired_ones_are_pruned(isolated_state_
         async with app.run_test(size=(220, 40)) as pilot:
             await _run_with_mock_prs(app, pilot)
             assert _row_keys(app) == [app._row_key(MOCK_PRS[0]), app._row_key(MOCK_PRS[2])]
+            saved = json.loads(isolated_state_file.read_text(encoding="utf-8"))["ignored"]
+            assert list(saved) == ["Equinor/ecm-iso-wp-gl0560-api-iac#41"], "expired entry should be saved away"
 
             app._ignores["Equinor/ecm-api-backend#42"] = now - timedelta(seconds=1)
             app._rebuild_table()
