@@ -13,12 +13,14 @@ Root cause guarded against:
 """
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.events import Click, MouseScrollDown, MouseScrollUp
@@ -480,3 +482,153 @@ async def test_connectivity_error_hides_error_panel():
                 )
         except WorkerFailed:
             pass  # Textual re-raises worker exceptions on teardown; assertions already ran
+
+
+def _row_keys(app: PRWatcherApp) -> list[str]:
+    table = app.query_one("#pr-table", PRTable)
+    return [row.key.value for row in table.ordered_rows]
+
+
+def _status_text(app: PRWatcherApp) -> str:
+    return str(app.query_one("#status-bar", Static).content)
+
+
+def _i_label(app: PRWatcherApp) -> str:
+    return app.screen.active_bindings["i"].binding.description
+
+
+async def _click_ignored_link(app: PRWatcherApp, pilot) -> None:
+    """Click the 🙈 segment in the status bar, like a user would."""
+    status = app.query_one("#status-bar", Static)
+    plain = status.visual.plain
+    x = status.styles.padding.left + cell_len(plain[: plain.index("🙈")]) + 3
+    await pilot.click("#status-bar", offset=(x, 0))
+    await pilot.pause()
+
+
+async def test_ignore_hides_pr_and_persists(isolated_state_file):
+    """Pressing i hides the PR, saves it to the state file and Enter maps to visible rows."""
+    app = PRWatcherApp(Config(org="Equinor", ignore_days=7))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert _row_keys(app) == [app._row_key(MOCK_PRS[1]), app._row_key(MOCK_PRS[2])]
+            assert "2 open PRs" in _status_text(app)
+            assert "🙈 1 ignored" in _status_text(app)
+
+            saved = json.loads(isolated_state_file.read_text(encoding="utf-8"))["ignored"]
+            until = datetime.fromisoformat(saved[app._row_key(MOCK_PRS[0])])
+            expected = datetime.now(timezone.utc) + timedelta(days=7)
+            assert abs((until - expected).total_seconds()) < 60
+
+            with patch("pr_watcher.app.open_url") as mock_open:
+                app.action_open_pr()
+            mock_open.assert_called_once_with(MOCK_PRS[1]["url"])
+
+
+async def test_ignored_view_shows_only_ignored_and_restores(isolated_state_file):
+    """Clicking the ignored count toggles the ignored-only view; i there restores the PR."""
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            table.move_cursor(row=1)
+            assert _i_label(app) == "Ignore"
+            await pilot.press("i")
+            await pilot.pause()
+            await _click_ignored_link(app, pilot)
+
+            assert app._show_ignored
+            assert _i_label(app) == "Restore PR"
+            assert _row_keys(app) == [app._row_key(MOCK_PRS[1])]
+            assert str(table.columns[app._col_keys["age"]].label) == "Until"
+            assert "🙈 1 ignored PR " in _status_text(app)
+            with patch("pr_watcher.app.open_url") as mock_open:
+                app.action_open_pr()
+            mock_open.assert_called_once_with(MOCK_PRS[1]["url"])
+
+            await pilot.press("i")
+            await pilot.pause()
+            assert _row_keys(app) == []
+            assert json.loads(isolated_state_file.read_text(encoding="utf-8")) == {"ignored": {}}
+
+            await _click_ignored_link(app, pilot)
+            assert not app._show_ignored
+            assert _i_label(app) == "Ignore"
+            assert _row_keys(app) == [app._row_key(pr) for pr in MOCK_PRS]
+            assert str(table.columns[app._col_keys["age"]].label) == "Age"
+
+
+async def test_existing_ignores_load_and_expired_ones_are_pruned(isolated_state_file):
+    """Active ignores from the state file hide PRs; expired ones are dropped and saved."""
+    now = datetime.now(timezone.utc)
+    isolated_state_file.write_text(
+        json.dumps({"ignored": {
+            "Equinor/ecm-iso-wp-gl0560-api-iac#41": (now + timedelta(days=3)).isoformat(),
+            "Equinor/ecm-wo-preparation-service#100": (now - timedelta(minutes=1)).isoformat(),
+        }}),
+        encoding="utf-8",
+    )
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            assert _row_keys(app) == [app._row_key(MOCK_PRS[0]), app._row_key(MOCK_PRS[2])]
+
+            app._ignores["Equinor/ecm-api-backend#42"] = now - timedelta(seconds=1)
+            app._rebuild_table()
+            saved = json.loads(isolated_state_file.read_text(encoding="utf-8"))["ignored"]
+            assert list(saved) == ["Equinor/ecm-iso-wp-gl0560-api-iac#41"]
+
+
+async def test_cursor_follows_pr_across_refresh_so_ignore_targets_it(isolated_state_file):
+    """A refresh keeps the cursor on the same PR even if the order changes, so i hits it."""
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS) as fetch:
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            table.move_cursor(row=0)
+            target = _row_keys(app)[0]
+            last = len(MOCK_PRS) - 1
+
+            fetch.return_value = list(reversed(MOCK_PRS))
+            app.action_refresh()
+            await _run_with_mock_prs(app, pilot)
+            assert _row_keys(app)[last] == target, "refresh should apply new order"
+            assert table.cursor_row == last
+
+            await pilot.press("i")
+            await pilot.pause()
+            saved = json.loads(isolated_state_file.read_text(encoding="utf-8"))["ignored"]
+            assert list(saved) == [target]
+            assert table.cursor_row == last - 1, "cursor should clamp to the new last row"
+
+
+async def test_ignored_view_hint_stays_visible_while_refreshing(isolated_state_file):
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            await pilot.press("i")
+            await pilot.pause()
+            await _click_ignored_link(app, pilot)
+            app._loading = True
+            app._update_status_bar()
+            status = _status_text(app)
+            assert "🙈 1 ignored PR (click to go back)" in status
+            assert "Refreshing" in status
+
+
+async def test_corrupt_state_file_warns_and_starts(isolated_state_file):
+    isolated_state_file.write_text("{not json", encoding="utf-8")
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            assert len(_row_keys(app)) == len(MOCK_PRS)
+            assert any("unreadable" in n.message for n in app._notifications)
