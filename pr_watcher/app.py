@@ -7,7 +7,7 @@ Layout
 │  🔍 PR Watcher  |  Org: acme  |  Team: ECM WO Preparation  │  ← header (1 line)
 ├──────────────────────────────────────────────────────────────┤
 │  DataTable (fills remaining height)                         │
-│   #   Repository     Title             Author  Reviewers  Status  Age  Comments │
+│   #   Repository     Title             Author  Reviewers  Status  Age  Last change  Comments │
 │  ──  ────────────────────────────────────────────────────────────── │
 │ ► #42  my-service  feat: add widget  alice   ✓ Appr.  2d      3    │  ← selected row
 │   #41  api-gateway fix: null check   bob    ⏳ Review  5d      1    │
@@ -148,10 +148,12 @@ def pr_priority(pr: dict) -> int:
 
 
 def order_prs(prs: list[dict], sort: str) -> list[dict]:
-    """Return PRs in display order; "created" keeps the newest-first fetch order."""
-    if sort != "priority":
-        return list(prs)
-    return sorted(prs, key=lambda pr: (pr_priority(pr), pr.get("createdAt", "")))
+    """Return PRs in the configured display order."""
+    if sort == "priority":
+        return sorted(prs, key=lambda pr: (pr_priority(pr), pr.get("createdAt", "")))
+    if sort == "updated":
+        return sorted(prs, key=lambda pr: pr.get("updatedAt", ""), reverse=True)
+    return list(prs)
 
 
 def format_labels(labels: list[dict]) -> str:
@@ -316,6 +318,7 @@ class PRWatcherApp(App):
             "reviewers": 9,
             "review": 8,
             "age": 3,
+            "updated": 11,
             "comments": 8,
             "labels": 0,
         }
@@ -327,6 +330,7 @@ class PRWatcherApp(App):
             "reviewers": 30,
             "review": 16,
             "age": 5,
+            "updated": 11,
             "comments": 8,
             "labels": 40,
         }
@@ -340,6 +344,7 @@ class PRWatcherApp(App):
             w["reviewers"] = max(w["reviewers"], len(format_reviewers(pr)))
             w["review"] = max(w["review"], len(format_review_status(pr)))
             w["age"]    = max(w["age"],    len(format_age(pr.get("createdAt", ""))))
+            w["updated"] = max(w["updated"], len(format_age(pr.get("updatedAt", ""))))
             w["comments"] = max(w["comments"], len(str(comment_count(pr))) + 1)
             w["labels"] = max(w["labels"], len(format_labels(pr.get("labels", []))))
 
@@ -347,18 +352,29 @@ class PRWatcherApp(App):
         for k in mins:
             w[k] = max(mins[k], min(w[k], maxes[k]))
 
-        # Truly fixed columns: number, repo, author, review, age, comments
         # DataTable.Column.get_render_width() adds 2*cell_padding (default=1) to every
         # column's width; derive the overhead from the number of columns.
         NUM_COLS = len(mins)
         CELL_PADDING = 1  # DataTable default
         SEPARATORS = NUM_COLS * 2 * CELL_PADDING
-        fixed = sum(w[k] for k in ("number", "repo", "author", "review", "age", "comments"))
+        flexible_keys = ("title", "labels", "reviewers")
+        fixed_keys = ("number", "repo", "author", "review", "age", "updated", "comments")
+        fixed = sum(w[k] for k in fixed_keys)
         width = terminal_width if terminal_width is not None else self.size.width
-        remaining = max(
-            mins["title"] + mins["labels"] + mins["reviewers"],
-            width - fixed - SEPARATORS,
-        )
+        content_width = max(sum(mins.values()), width - SEPARATORS)
+        flexible_min = sum(mins[k] for k in flexible_keys)
+
+        # Repository, author, and review cells can be clipped with tooltip support.
+        overflow = max(0, fixed + flexible_min - content_width)
+        for key in ("repo", "author", "review"):
+            reduction = min(overflow, w[key] - mins[key])
+            w[key] -= reduction
+            overflow -= reduction
+            if overflow == 0:
+                break
+
+        fixed = sum(w[k] for k in fixed_keys)
+        remaining = max(flexible_min, content_width - fixed)
         w["reviewers"] = min(w["reviewers"], remaining - mins["title"] - mins["labels"])
         remaining -= w["reviewers"]
 
@@ -412,6 +428,7 @@ class PRWatcherApp(App):
         self._col_keys["reviewers"] = table.add_column("Reviewers", width=30)
         self._col_keys["review"] = table.add_column("Review Status",width=16)
         self._col_keys["age"]    = table.add_column("Age",          width=5)
+        self._col_keys["updated"] = table.add_column("Last change", width=11)
         self._col_keys["comments"] = table.add_column("Comments",   width=8)
         self._col_keys["labels"] = table.add_column("Labels",       width=22)
 
@@ -586,6 +603,7 @@ class PRWatcherApp(App):
                 format_reviewers(pr),
                 format_review_status(pr),
                 format_age(pr.get("createdAt", "")),
+                format_age(pr.get("updatedAt", "")),
                 self._comment_display(pr),
                 format_labels(pr.get("labels", [])),
                 key=self._row_key(pr),

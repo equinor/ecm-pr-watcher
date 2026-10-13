@@ -6,10 +6,9 @@ runs.
 
 Root cause guarded against:
     DataTable.Column.get_render_width() adds ``2 * cell_padding`` (default = 1)
-    to every column's stored width.  The original 8 columns needed 16 characters
-    of rendering overhead.  The original code used ``SEPARATORS = 6``, which was 10
-    characters too small, causing virtual_size.width > size.width and a
-    persistent horizontal scrollbar.
+    to every column's stored width. Every column needs two characters of
+    rendering overhead. Under-counting that overhead causes
+    virtual_size.width > size.width and a persistent horizontal scrollbar.
 """
 from __future__ import annotations
 
@@ -50,6 +49,7 @@ MOCK_PRS = [
         "reviewDecision": "APPROVED",
         "isDraft": False,
         "createdAt": _iso(timedelta(days=2)),
+        "updatedAt": _iso(timedelta(hours=2)),
         "totalCommentsCount": 1,
         "labels": [{"name": "feature"}, {"name": "backend"}],
         "url": "https://github.com/Equinor/ecm-api-backend/pull/42",
@@ -62,6 +62,7 @@ MOCK_PRS = [
         "reviewDecision": "REVIEW_REQUIRED",
         "isDraft": False,
         "createdAt": _iso(timedelta(days=5)),
+        "updatedAt": _iso(timedelta(days=1)),
         "totalCommentsCount": 0,
         "labels": [],
         "url": "https://github.com/Equinor/ecm-iso-wp-gl0560-api-iac/pull/41",
@@ -74,6 +75,7 @@ MOCK_PRS = [
         "reviewDecision": "CHANGES_REQUESTED",
         "isDraft": False,
         "createdAt": _iso(timedelta(hours=3)),
+        "updatedAt": _iso(timedelta(minutes=30)),
         "totalCommentsCount": 2,
         "labels": [{"name": "chore"}, {"name": "deps"}, {"name": "semver"}, {"name": "auto"}],
         "url": "https://github.com/Equinor/ecm-wo-preparation-service/pull/100",
@@ -155,6 +157,20 @@ async def test_reviewers_column_next_to_author():
             await pilot.pause(0.2)
             assert table.columns[app._col_keys["reviewers"]].width < 30
             assert table.virtual_size.width <= table.size.width
+
+
+async def test_last_change_column_uses_updated_timestamp():
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            assert [str(column.label) for column in table.ordered_columns][6:9] == [
+                "Age", "Last change", "Comments",
+            ]
+            assert table.get_cell(
+                "Equinor/ecm-api-backend#42", app._col_keys["updated"],
+            ) == "2h"
 
 
 @pytest.mark.parametrize("column", ["repo", "title", "author", "reviewers", "labels"])
@@ -351,6 +367,19 @@ async def test_priority_sort_orders_rows_and_opens_matching_pr():
             with patch("pr_watcher.app.open_url") as mock_open:
                 app.action_open_pr()
             mock_open.assert_called_once_with(MOCK_PRS[0]["url"])
+
+
+async def test_updated_sort_orders_most_recent_change_first():
+    app = PRWatcherApp(Config(org="Equinor", sort="updated"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            assert [row.key.value for row in table.ordered_rows] == [
+                app._row_key(MOCK_PRS[2]),
+                app._row_key(MOCK_PRS[0]),
+                app._row_key(MOCK_PRS[1]),
+            ]
 
 
 async def test_rapid_duplicate_opens_are_debounced():

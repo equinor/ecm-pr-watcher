@@ -16,7 +16,9 @@ _SETTING_TYPES: dict[str, type] = {
     "bell": bool,
     "sort": str,
 }
-_SETTING_CHOICES: dict[str, tuple[str, ...]] = {"sort": ("created", "priority")}
+_SETTING_CHOICES: dict[str, tuple[str, ...]] = {
+    "sort": ("created", "priority", "updated"),
+}
 
 
 @dataclass
