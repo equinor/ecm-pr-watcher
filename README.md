@@ -72,10 +72,17 @@ python main.py --org Equinor --team-slug ecm-wo-preparation
 |-----|--------|
 | `q` | Quit the application |
 | `r` | Force an immediate refresh |
+| `u` | Check the current Git branch for updates and restart if it changed |
 | `Enter` | Open the selected PR in the default browser |
 | `i` | Ignore the selected PR for `ignore_days` days. In the ignored view the footer label changes to **Restore PR** and `i` restores it |
 | `↑` / `↓` | Navigate the PR list |
 | `Ctrl+C` | Quit the application |
+
+The update check requires a clean Git worktree and runs `git pull --ff-only`
+against the current branch's configured upstream. Python does not keep imported
+source files locked, but a running process keeps the old code in memory. When
+`HEAD` changes, the app exits cleanly and restarts the original Python command
+so the updated modules are imported.
 
 Click **🙈 N ignored** in the status bar to switch to the ignored-PRs view (the Age column shows when each ignore ends); click it again to go back.
 

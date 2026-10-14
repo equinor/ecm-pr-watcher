@@ -1,6 +1,7 @@
 """Tests for pure helper functions in pr_watcher/app.py."""
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from pr_watcher.app import (
     format_review_status,
     format_reviewers,
     order_prs,
+    pull_updates,
     pr_priority,
     repo_short_name,
 )
@@ -37,6 +39,78 @@ def _pr(
         "reviewRequests": {"nodes": [{"requestedReviewer": r} for r in requested or []]},
         "latestReviews": {"nodes": reviews or []},
     }
+
+
+def _git_result(
+    stdout: str = "",
+    stderr: str = "",
+    returncode: int = 0,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=[],
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+class TestPullUpdates:
+    def test_returns_true_when_head_changes(self, tmp_path):
+        responses = [
+            _git_result(stdout="old-head\n"),
+            _git_result(),
+            _git_result(stdout="Updating old-head..new-head\n"),
+            _git_result(stdout="new-head\n"),
+        ]
+        with patch("pr_watcher.app.subprocess.run", side_effect=responses) as run:
+            assert pull_updates(tmp_path)
+
+        assert [call.args[0] for call in run.call_args_list] == [
+            ["git", "rev-parse", "HEAD"],
+            ["git", "status", "--porcelain"],
+            ["git", "pull", "--ff-only"],
+            ["git", "rev-parse", "HEAD"],
+        ]
+        assert all(call.kwargs["cwd"] == tmp_path for call in run.call_args_list)
+        assert run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_returns_false_when_already_current(self, tmp_path):
+        responses = [
+            _git_result(stdout="same-head\n"),
+            _git_result(),
+            _git_result(stdout="Already up to date.\n"),
+            _git_result(stdout="same-head\n"),
+        ]
+        with patch("pr_watcher.app.subprocess.run", side_effect=responses):
+            assert not pull_updates(tmp_path)
+
+    def test_refuses_dirty_worktree(self, tmp_path):
+        responses = [
+            _git_result(stdout="head\n"),
+            _git_result(stdout=" M pr_watcher/app.py\n"),
+        ]
+        with patch("pr_watcher.app.subprocess.run", side_effect=responses) as run:
+            with pytest.raises(RuntimeError, match="uncommitted changes"):
+                pull_updates(tmp_path)
+        assert run.call_count == 2
+
+    def test_surfaces_pull_error(self, tmp_path):
+        responses = [
+            _git_result(stdout="head\n"),
+            _git_result(),
+            _git_result(stderr="no tracking information", returncode=1),
+        ]
+        with patch("pr_watcher.app.subprocess.run", side_effect=responses):
+            with pytest.raises(
+                RuntimeError,
+                match="git pull --ff-only failed: no tracking information",
+            ):
+                pull_updates(tmp_path)
+
+    def test_reports_missing_git(self, tmp_path):
+        with patch("pr_watcher.app.subprocess.run", side_effect=FileNotFoundError):
+            with pytest.raises(RuntimeError, match="Git is not installed"):
+                pull_updates(tmp_path)
 
 
 class TestPrPriority:
