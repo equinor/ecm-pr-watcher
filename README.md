@@ -4,7 +4,10 @@ A terminal-based (TUI) dashboard for monitoring open Pull Requests across all re
 
 ## Screenshot
 
-![ecm-pr-watcher in action](docs/screenshot.png)
+![PR Watcher showing pull-request activity, review status, ignored count, and shortcuts](docs/screenshot.png)
+
+The screenshot uses representative sample data and shows the current table
+columns, review states, ignored-PR count, refresh status, and keyboard shortcuts.
 
 ## Prerequisites
 
