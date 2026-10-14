@@ -182,6 +182,10 @@ class TestConfig:
         assert cfg.refresh_interval == 60
         assert cfg.bell is True
         assert cfg.sort == "created"
+        assert cfg.ignore_days == 14
+
+    def test_state_file_defaults_next_to_settings(self, isolated_state_file):
+        assert Config(org="Equinor").state_file == isolated_state_file
 
 
 class TestLoadSettings:
@@ -198,6 +202,12 @@ class TestLoadSettings:
         path = tmp_path / "pr-watcher.json"
         path.write_text('{"sort": "priority"}', encoding="utf-8-sig")
         assert load_settings(path) == {"sort": "priority"}
+
+    @pytest.mark.parametrize("days", [1, 14, 90, 3650])
+    def test_reads_ignore_days(self, tmp_path, days):
+        path = tmp_path / "pr-watcher.json"
+        path.write_text(json.dumps({"ignore_days": days}), encoding="utf-8")
+        assert load_settings(path) == {"ignore_days": days}
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -222,8 +232,15 @@ class TestLoadSettings:
             ("{not json", "invalid JSON"),
             ("[]", "expected a JSON object"),
             ('{"approved_last": true}', "unknown setting"),
+            ('{"state_file": "x.json"}', "unknown setting"),
             ('{"sort": 1}', "must be str"),
             ('{"sort": "oldest"}', "must be one of: created, priority, updated"),
+            ('{"ignore_days": 0}', "must be at least 1"),
+            ('{"ignore_days": -1}', "must be at least 1"),
+            ('{"ignore_days": 3651}', "must be at most 3650"),
+            ('{"ignore_days": true}', "must be int"),
+            ('{"ignore_days": "14"}', "must be int"),
+            ('{"ignore_days": 1.5}', "must be int"),
             ('{"org": 1}', "must be str"),
             ('{"team": false}', "must be str"),
             ('{"team_slug": []}', "must be str"),
@@ -251,4 +268,5 @@ class TestLoadSettings:
             "interval": 30,
             "bell": False,
             "sort": "priority",
+            "ignore_days": 14,
         }

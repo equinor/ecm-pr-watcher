@@ -12,16 +12,19 @@ Layout
 │ ► #42  my-service  feat: add widget  alice   ✓ Appr.  2d      3    │  ← selected row
 │   #41  api-gateway fix: null check   bob    ⏳ Review  5d      1    │
 ├──────────────────────────────────────────────────────────────┤
-│  📋 12 PRs  │  Updated 14:23:01  │  Refresh in 45s          │  ← status bar
+│  📋 12 PRs  │  🙈 2 ignored  │  Updated 14:23:01  │  Refresh in 45s │  ← status bar
 ├──────────────────────────────────────────────────────────────┤
-│  q quit   r refresh   Enter open in browser                 │  ← Footer
+│  q quit   r refresh   Enter open   i ignore                   │  ← Footer
 └──────────────────────────────────────────────────────────────┘
+
+Clicking "🙈 N ignored" in the status bar toggles the ignored-only view, where
+`i` restores the PR under the cursor instead of ignoring it.
 """
 from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Optional
 
@@ -39,6 +42,7 @@ from textual.worker import Worker, WorkerState
 
 from .config import Config
 from . import github
+from .ignores import load_ignores, prune_expired, save_ignores
 
 _CONNECTIVITY_MARKERS = (
     "error connecting",
@@ -281,6 +285,8 @@ class PRWatcherApp(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh now"),
         Binding("enter", "open_pr", "Open in browser"),
+        Binding("i", "ignore", "Ignore"),
+        Binding("i", "restore", "Restore PR"),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
 
@@ -288,6 +294,10 @@ class PRWatcherApp(App):
         super().__init__()
         self.config = config
         self._prs: list[dict] = []
+        self._visible_prs: list[dict] = []
+        self._show_ignored: bool = False
+        # Expired entries are pruned (and saved) by the first _rebuild_table().
+        self._ignores, self._ignore_warning = load_ignores(config.state_file)
         self._known_prs: set[tuple[str, int]] = set()
         self._comment_counts: dict[tuple[str, int], int] = {}
         self._unread_comment_updates: set[tuple[str, int]] = set()
@@ -329,21 +339,21 @@ class PRWatcherApp(App):
             "author": 20,
             "reviewers": 30,
             "review": 16,
-            "age": 5,
+            "age": 6,
             "updated": 11,
             "comments": 8,
             "labels": 40,
         }
 
         w = dict(mins)
-        for pr in self._prs:
+        for pr in self._visible_prs:
             w["number"] = max(w["number"], len(f"#{pr['number']}"))
             w["repo"]   = max(w["repo"],   len(repo_short_name(pr.get("repository", ""))))
             w["title"]  = max(w["title"],  len(pr.get("title", "")))
             w["author"] = max(w["author"], len(pr.get("author", {}).get("login", "")))
             w["reviewers"] = max(w["reviewers"], len(format_reviewers(pr)))
             w["review"] = max(w["review"], len(format_review_status(pr)))
-            w["age"]    = max(w["age"],    len(format_age(pr.get("createdAt", ""))))
+            w["age"]    = max(w["age"],    len(self._age_display(pr)))
             w["updated"] = max(w["updated"], len(format_age(pr.get("updatedAt", ""))))
             w["comments"] = max(w["comments"], len(str(comment_count(pr))) + 1)
             w["labels"] = max(w["labels"], len(format_labels(pr.get("labels", []))))
@@ -460,6 +470,9 @@ class PRWatcherApp(App):
 
         # 1-second tick for countdown updates and auto-refresh trigger
         self.set_interval(1, self._tick)
+
+        if self._ignore_warning:
+            self.notify(self._ignore_warning, title="PR Watcher", severity="warning")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -608,12 +621,56 @@ class PRWatcherApp(App):
             str(comment_count(pr)),
         )
 
-    def _rebuild_table(self) -> None:
-        col_widths = self._compute_col_widths()
+    def _is_ignored(self, pr: dict) -> bool:
+        return self._row_key(pr) in self._ignores
+
+    def _age_display(self, pr: dict) -> str:
+        if self._show_ignored and self._is_ignored(pr):
+            return self._ignores[self._row_key(pr)].astimezone().strftime("%d %b")
+        return format_age(pr.get("createdAt", ""))
+
+    def _prune_ignores(self) -> None:
+        pruned = prune_expired(self._ignores, datetime.now(timezone.utc))
+        if len(pruned) != len(self._ignores):
+            self._ignores = pruned
+            self._save_ignores()
+
+    def _save_ignores(self) -> None:
+        try:
+            save_ignores(self.config.state_file, self._ignores)
+        except OSError as exc:
+            self.notify(
+                f"Could not save ignored PRs: {exc}",
+                title="PR Watcher",
+                severity="error",
+            )
+
+    def _rebuild_table(self, keep_cursor: bool = True) -> None:
+        """Re-render visible rows, keeping the cursor on the same PR when possible.
+
+        DataTable.clear() resets the cursor to row 0; without restoring it, a
+        refresh would make `i`/Enter act on whichever PR happens to be first.
+        If the PR under the cursor is gone (e.g. just ignored), the cursor stays
+        at the same index so it lands on the next row.
+        """
         table = self.query_one("#pr-table", DataTable)
+        old_row = table.cursor_row
+        old_key = (
+            self._row_key(self._visible_prs[old_row])
+            if keep_cursor and 0 <= old_row < len(self._visible_prs)
+            else None
+        )
+        self._prune_ignores()
+        self._visible_prs = [
+            pr for pr in self._prs if self._is_ignored(pr) == self._show_ignored
+        ]
+        col_widths = self._compute_col_widths()
         table.tooltip = None
         table.clear()
-        for pr in self._prs:
+        table.columns[self._col_keys["age"]].label = Text(
+            "Until" if self._show_ignored else "Age"
+        )
+        for pr in self._visible_prs:
             table.add_row(
                 f"#{pr['number']}",
                 ellipsis_middle(repo_short_name(pr.get("repository", "")), col_widths["repo"]),
@@ -621,13 +678,19 @@ class PRWatcherApp(App):
                 pr.get("author", {}).get("login", ""),
                 format_reviewers(pr),
                 format_review_status(pr),
-                format_age(pr.get("createdAt", "")),
+                self._age_display(pr),
                 format_age(pr.get("updatedAt", "")),
                 self._comment_display(pr),
                 format_labels(pr.get("labels", [])),
                 key=self._row_key(pr),
             )
         self._apply_col_widths(col_widths)
+        if keep_cursor and table.row_count:
+            new_row = next(
+                (i for i, pr in enumerate(self._visible_prs) if self._row_key(pr) == old_key),
+                min(max(old_row, 0), table.row_count - 1),
+            )
+            table.move_cursor(row=new_row)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -636,12 +699,22 @@ class PRWatcherApp(App):
     def _update_status_bar(self) -> None:
         parts: list[str] = []
 
-        if self._loading:
-            parts.append("⟳ Refreshing…")
-        else:
-            n = len(self._prs)
+        if self._show_ignored:
+            n = len(self._visible_prs)
+            parts.append(
+                f"[@click=app.toggle_ignored_view]🙈 {n} ignored PR{'s' if n != 1 else ''}"
+                " (click to go back)[/]"
+            )
+        elif not self._loading:
+            n = len(self._visible_prs)
             icon = "📋" if n else "📭"
             parts.append(f"{icon} {n} open PR{'s' if n != 1 else ''}")
+            ignored = sum(1 for pr in self._prs if self._is_ignored(pr))
+            if ignored:
+                parts.append(f"[@click=app.toggle_ignored_view]🙈 {ignored} ignored[/]")
+
+        if self._loading:
+            parts.append("⟳ Refreshing…")
 
         if self._last_updated:
             parts.append(f"Updated {self._last_updated.strftime('%H:%M:%S')}")
@@ -747,10 +820,53 @@ class PRWatcherApp(App):
 
     def action_open_pr(self) -> None:
         table = self.query_one("#pr-table", DataTable)
-        if table.row_count == 0 or not self._prs:
+        if table.row_count == 0 or not self._visible_prs:
             return
         row_idx = table.cursor_row
-        if 0 <= row_idx < len(self._prs):
-            pr = self._prs[row_idx]
+        if 0 <= row_idx < len(self._visible_prs):
+            pr = self._visible_prs[row_idx]
             self._acknowledge_comment_update(pr)
             self._open_pr(pr)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Both actions share the `i` key; only the one matching the view is active,
+        # which also makes the Footer show "Ignore" or "Restore PR".
+        if action == "ignore":
+            return not self._show_ignored
+        if action == "restore":
+            return self._show_ignored
+        return True
+
+    def action_ignore(self) -> None:
+        self._toggle_ignore()
+
+    def action_restore(self) -> None:
+        self._toggle_ignore()
+
+    def _toggle_ignore(self) -> None:
+        table = self.query_one("#pr-table", DataTable)
+        row_idx = table.cursor_row
+        if table.row_count == 0 or not 0 <= row_idx < len(self._visible_prs):
+            return
+        pr = self._visible_prs[row_idx]
+        key = self._row_key(pr)
+        if key in self._ignores:
+            del self._ignores[key]
+            message = f"Restored PR #{pr['number']}"
+        else:
+            until = datetime.now(timezone.utc) + timedelta(days=self.config.ignore_days)
+            self._ignores[key] = until
+            message = (
+                f"Ignored PR #{pr['number']} until "
+                f"{until.astimezone().strftime('%d %b')}"
+            )
+        self._save_ignores()
+        self._rebuild_table()
+        self._update_status_bar()
+        self.notify(message, title="PR Watcher", timeout=2)
+
+    def action_toggle_ignored_view(self) -> None:
+        self._show_ignored = not self._show_ignored
+        self._rebuild_table(keep_cursor=False)
+        self._update_status_bar()
+        self.refresh_bindings()

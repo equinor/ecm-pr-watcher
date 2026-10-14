@@ -73,8 +73,11 @@ python main.py --org Equinor --team-slug ecm-wo-preparation
 | `q` | Quit the application |
 | `r` | Force an immediate refresh |
 | `Enter` | Open the selected PR in the default browser |
+| `i` | Ignore the selected PR for `ignore_days` days. In the ignored view the footer label changes to **Restore PR** and `i` restores it |
 | `↑` / `↓` | Navigate the PR list |
 | `Ctrl+C` | Quit the application |
+
+Click **🙈 N ignored** in the status bar to switch to the ignored-PRs view (the Age column shows when each ignore ends); click it again to go back.
 
 Hover over clipped table cells to see their full text in a tooltip, including
 repository names, titles, authors, reviewers, and labels. This requires a terminal
@@ -118,8 +121,11 @@ python main.py
 | `interval` | `60` | Auto-refresh interval in seconds (integer), corresponding to `--interval` |
 | `bell` | `true` | Ring terminal bell when new PRs appear; use `false` for `--no-bell` |
 | `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"updated"` shows the most recently changed PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
+| `ignore_days` | `14` | How many days a PR stays hidden after you press `i` on it. Must be a whole number from 1 to 3650. |
 
 The app refuses to start if the file contains invalid JSON, unknown settings, or wrong value types.
+
+Ignored PRs are saved in `pr-watcher-state.json` in the repository root. The app manages this file and git ignores it. An ignored PR reappears automatically when its ignore period ends. If the file becomes unreadable, the app shows a warning, starts with no ignored PRs, and overwrites the file the next time you ignore a PR.
 
 **How the app works:**
 

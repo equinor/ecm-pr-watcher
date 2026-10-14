@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SETTINGS_FILE = Path(__file__).resolve().parent.parent / "pr-watcher.json"
+STATE_FILE = SETTINGS_FILE.with_name("pr-watcher-state.json")
 _SETTING_TYPES: dict[str, type] = {
     "org": str,
     "team": str,
@@ -15,10 +16,13 @@ _SETTING_TYPES: dict[str, type] = {
     "interval": int,
     "bell": bool,
     "sort": str,
+    "ignore_days": int,
 }
 _SETTING_CHOICES: dict[str, tuple[str, ...]] = {
     "sort": ("created", "priority", "updated"),
 }
+_SETTING_MINIMUMS: dict[str, int] = {"ignore_days": 1}
+_SETTING_MAXIMUMS: dict[str, int] = {"ignore_days": 3650}
 
 
 @dataclass
@@ -29,10 +33,14 @@ class Config:
     refresh_interval: int = 60
     bell: bool = True
     sort: str = "created"
+    ignore_days: int = 14
+    state_file: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.team_slug:
             self.team_slug = to_slug(self.team)
+        if self.state_file is None:
+            self.state_file = STATE_FILE
 
 
 def to_slug(name: str) -> str:
@@ -64,6 +72,12 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
         choices = _SETTING_CHOICES.get(key)
         if choices and value not in choices:
             raise ValueError(f"{path}: '{key}' must be one of: {', '.join(choices)}")
+        minimum = _SETTING_MINIMUMS.get(key)
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{path}: '{key}' must be at least {minimum}")
+        maximum = _SETTING_MAXIMUMS.get(key)
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{path}: '{key}' must be at most {maximum}")
     return data
 
 

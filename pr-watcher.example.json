@@ -4,5 +4,6 @@
   "team_slug": "my-team",
   "interval": 30,
   "bell": false,
-  "sort": "priority"
+  "sort": "priority",
+  "ignore_days": 14
 }
