@@ -26,8 +26,8 @@ from textual.events import Click, MouseScrollDown, MouseScrollUp
 from textual.widgets import Static
 from textual.widgets._tooltip import Tooltip
 
-from pr_watcher.app import PRTable, PRWatcherApp
-from pr_watcher.config import Config
+from pr_watcher.app import PRTable, PRWatcherApp, RESTART_AFTER_UPDATE
+from pr_watcher.config import Config, SETTINGS_FILE
 
 
 def _iso(delta: timedelta) -> str:
@@ -666,3 +666,60 @@ async def test_corrupt_state_file_warns_and_starts(isolated_state_file):
             await _run_with_mock_prs(app, pilot)
             assert len(_row_keys(app)) == len(MOCK_PRS)
             assert any("unreadable" in n.message for n in app._notifications)
+
+
+async def test_update_shortcut_restarts_when_head_changes(isolated_state_file):
+    app = PRWatcherApp(Config(org="Equinor"))
+    with (
+        patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS),
+        patch("pr_watcher.app.pull_updates", return_value=True) as update,
+    ):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            with patch.object(app, "exit") as exit_app:
+                await pilot.press("u")
+                await pilot.pause(0.2)
+
+            update.assert_called_once_with(SETTINGS_FILE.parent)
+            exit_app.assert_called_once_with(result=RESTART_AFTER_UPDATE)
+            assert not app._checking_update
+
+
+async def test_update_shortcut_reports_current_version(isolated_state_file):
+    app = PRWatcherApp(Config(org="Equinor"))
+    with (
+        patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS),
+        patch("pr_watcher.app.pull_updates", return_value=False),
+    ):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            await pilot.press("u")
+            await pilot.pause(0.2)
+
+            assert any(
+                notification.message == "Already up to date."
+                for notification in app._notifications
+            )
+            assert not app._checking_update
+
+
+async def test_update_shortcut_reports_failure(isolated_state_file):
+    app = PRWatcherApp(Config(org="Equinor"))
+    with (
+        patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS),
+        patch(
+            "pr_watcher.app.pull_updates",
+            side_effect=RuntimeError("Cannot update a dirty worktree."),
+        ),
+    ):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            await pilot.press("u")
+            await pilot.pause(0.2)
+
+            assert any(
+                notification.message
+                == "Update failed: Cannot update a dirty worktree."
+                for notification in app._notifications
+            )
+            assert not app._checking_update

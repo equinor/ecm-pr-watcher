@@ -14,7 +14,7 @@ Layout
 ├──────────────────────────────────────────────────────────────┤
 │  📋 12 PRs  │  🙈 2 ignored  │  Updated 14:23:01  │  Refresh in 45s │  ← status bar
 ├──────────────────────────────────────────────────────────────┤
-│  q quit   r refresh   Enter open   i ignore                   │  ← Footer
+│  q quit   r refresh   u update   Enter open   i ignore        │  ← Footer
 └──────────────────────────────────────────────────────────────┘
 
 Clicking "🙈 N ignored" in the status bar toggles the ignored-only view, where
@@ -22,9 +22,11 @@ Clicking "🙈 N ignored" in the status bar toggles the ignored-only view, where
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from time import monotonic
 from typing import Optional
 
@@ -40,7 +42,7 @@ from textual.widgets._data_table import RowKey
 from textual import work
 from textual.worker import Worker, WorkerState
 
-from .config import Config
+from .config import Config, SETTINGS_FILE
 from . import github
 from .ignores import load_ignores, prune_expired, save_ignores
 
@@ -59,6 +61,9 @@ _COPILOT_REVIEWER_LOGINS = {
     "copilot-pull-request-reviewer",
     "copilot-pull-request-reviewer[bot]",
 }
+
+_UPDATE_TIMEOUT_SECONDS = 120
+RESTART_AFTER_UPDATE = object()
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -231,6 +236,41 @@ def open_url(url: str) -> None:
         pass
 
 
+def _run_git(repo_root: Path, *args: str) -> str:
+    command = ["git", *args]
+    environment = dict(os.environ)
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        result = subprocess.run(
+            command,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=_UPDATE_TIMEOUT_SECONDS,
+            env=environment,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Git is not installed or not available on PATH.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Timed out while checking for updates.") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise RuntimeError(f"{' '.join(command)} failed: {detail}")
+    return result.stdout.strip()
+
+
+def pull_updates(repo_root: Path) -> bool:
+    """Fast-forward the current branch and report whether HEAD changed."""
+    before = _run_git(repo_root, "rev-parse", "HEAD")
+    if _run_git(repo_root, "status", "--porcelain"):
+        raise RuntimeError(
+            "Cannot update while the repository has uncommitted changes."
+        )
+    _run_git(repo_root, "pull", "--ff-only")
+    after = _run_git(repo_root, "rev-parse", "HEAD")
+    return before != after
+
+
 # ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
@@ -284,6 +324,7 @@ class PRWatcherApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh now"),
+        Binding("u", "check_update", "Check for updates"),
         Binding("enter", "open_pr", "Open in browser"),
         Binding("i", "ignore", "Ignore"),
         Binding("i", "restore", "Restore PR"),
@@ -308,6 +349,7 @@ class PRWatcherApp(App):
         self._col_keys: dict[str, object] = {}  # populated in on_mount
         self._last_opened_url: Optional[str] = None
         self._last_opened_at: Optional[float] = None
+        self._checking_update: bool = False
 
     @property
     def _title_col_key(self):
@@ -507,7 +549,45 @@ class PRWatcherApp(App):
     def _fetch_prs(self) -> list[dict]:
         return github.fetch_all_team_prs(self.config.org, self.config.team_slug)
 
+    @work(
+        thread=True,
+        group="updates",
+        exclusive=True,
+        exit_on_error=False,
+        name="check-update",
+    )
+    def _pull_updates(self) -> bool:
+        return pull_updates(SETTINGS_FILE.parent)
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == "check-update":
+            if event.state == WorkerState.SUCCESS:
+                self._checking_update = False
+                if event.worker.result:
+                    self.notify(
+                        "Update installed. Restarting…",
+                        title="PR Watcher",
+                        timeout=2,
+                    )
+                    self.exit(result=RESTART_AFTER_UPDATE)
+                else:
+                    self.notify(
+                        "Already up to date.",
+                        title="PR Watcher",
+                        timeout=2,
+                    )
+            elif event.state == WorkerState.ERROR:
+                self._checking_update = False
+                self.notify(
+                    f"Update failed: {event.worker.error}",
+                    title="PR Watcher",
+                    severity="error",
+                    timeout=8,
+                )
+            elif event.state == WorkerState.CANCELLED:
+                self._checking_update = False
+            return
+
         if event.worker.name != "fetch-prs":
             return
 
@@ -774,6 +854,17 @@ class PRWatcherApp(App):
         if not self._loading:
             self._next_refresh = None
             self._start_fetch()
+
+    def action_check_update(self) -> None:
+        if self._checking_update:
+            return
+        self._checking_update = True
+        self.notify(
+            "Checking for updates…",
+            title="PR Watcher",
+            timeout=2,
+        )
+        self._pull_updates()
 
     _OPEN_PR_DEBOUNCE_SECONDS = 1.0
 
