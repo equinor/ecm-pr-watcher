@@ -230,6 +230,7 @@ class TestFetchAllTeamPrs:
         assert result[0]["number"] == 1
 
     def test_failed_repo_reuses_cache_while_valid_responses_replace_it(self):
+        failed_repos = []
         cached_prs = [
             {
                 "number": 10,
@@ -269,8 +270,10 @@ class TestFetchAllTeamPrs:
                 "Equinor",
                 "my-team",
                 cached_prs,
+                failed_repos,
             )
 
+        assert failed_repos == ["Equinor/bad"]
         assert [
             (pr["repository"], pr["number"])
             for pr in result

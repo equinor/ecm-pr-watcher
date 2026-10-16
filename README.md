@@ -142,7 +142,7 @@ Ignored PRs are saved in `pr-watcher-state.json` in the repository root. The app
 1. Uses `gh api` to list all repositories the target team has access to.
 2. For each repository, runs GraphQL PR queries concurrently (up to 5 parallel calls) to fetch open PRs.
 3. Refreshes automatically at the configured interval.
-4. Retains the previous rows for repositories whose refresh fails temporarily.
+4. Retains previous rows for repositories whose refresh fails and marks them as stale.
 5. Rings the terminal bell when PRs appear that weren't present in the previous fetch.
 
 > The app relies entirely on the authenticated `gh` CLI — no personal access tokens or secrets are needed beyond a normal `gh auth login`.

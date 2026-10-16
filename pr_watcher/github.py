@@ -156,11 +156,12 @@ def fetch_all_team_prs(
     org: str,
     team_slug: str,
     cached_prs: Optional[list[dict]] = None,
+    failed_repos: Optional[list[str]] = None,
 ) -> list[dict]:
     """
     Fetch all open PRs across every repo the team has access to.
     Uses up to 5 concurrent GitHub API calls.
-    Per-repo errors reuse cached PRs so transient failures do not clear rows.
+    Per-repo errors reuse cached PRs and are added to `failed_repos` when provided.
     """
     repos = fetch_team_repos(org, team_slug)
     cached_by_repo: dict[str, list[dict]] = {}
@@ -179,6 +180,8 @@ def fetch_all_team_prs(
             except Exception:
                 # Individual repo failures are non-fatal
                 all_prs.extend(cached_by_repo.get(repo, []))
+                if failed_repos is not None:
+                    failed_repos.append(repo)
 
     # Newest first
     all_prs.sort(key=lambda pr: pr.get("createdAt", ""), reverse=True)

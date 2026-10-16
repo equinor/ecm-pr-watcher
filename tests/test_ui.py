@@ -459,9 +459,10 @@ async def test_comment_increase_marked_until_row_selected():
 async def test_failed_refresh_keeps_rows_and_recovery_does_not_ring_bell():
     cached_inputs = []
 
-    def fetch(_org, _team_slug, cached_prs):
+    def fetch(_org, _team_slug, cached_prs, failed_repos):
         cached_inputs.append(deepcopy(cached_prs))
         if len(cached_inputs) == 2:
+            failed_repos.extend(["Equinor/repo-a", "Equinor/repo-b"])
             return list(cached_prs)
         return deepcopy(MOCK_PRS)
 
@@ -477,10 +478,12 @@ async def test_failed_refresh_keeps_rows_and_recovery_does_not_ring_bell():
             app.action_refresh()
             await pilot.pause(0.5)
             assert _row_keys(app) == expected_rows
+            assert "⚠ 2 repos stale" in _status_text(app)
 
             app.action_refresh()
             await pilot.pause(0.5)
             assert _row_keys(app) == expected_rows
+            assert "repos stale" not in _status_text(app)
 
     assert cached_inputs[0] == []
     assert cached_inputs[1] == MOCK_PRS
