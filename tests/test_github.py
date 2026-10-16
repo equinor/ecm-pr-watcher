@@ -168,6 +168,23 @@ class TestFetchPrsForRepo:
 # ---------------------------------------------------------------------------
 
 class TestFetchAllTeamPrs:
+    def test_limits_concurrent_fetches_to_five(self):
+        real_executor = github.ThreadPoolExecutor
+        worker_counts = []
+
+        class RecordingExecutor(real_executor):
+            def __init__(self, max_workers):
+                worker_counts.append(max_workers)
+                super().__init__(max_workers=max_workers)
+
+        with (
+            patch("pr_watcher.github.fetch_team_repos", return_value=[]),
+            patch("pr_watcher.github.ThreadPoolExecutor", RecordingExecutor),
+        ):
+            github.fetch_all_team_prs("Equinor", "my-team")
+
+        assert worker_counts == [5]
+
     def test_sorted_newest_first(self):
         prs = [
             {
@@ -211,3 +228,56 @@ class TestFetchAllTeamPrs:
                 result = github.fetch_all_team_prs("Equinor", "my-team")
         assert len(result) == 1
         assert result[0]["number"] == 1
+
+    def test_failed_repo_reuses_cache_while_valid_responses_replace_it(self):
+        failed_repos = []
+        cached_prs = [
+            {
+                "number": 10,
+                "repository": "Equinor/good",
+                "createdAt": "2024-01-01T00:00:00Z",
+            },
+            {
+                "number": 20,
+                "repository": "Equinor/bad",
+                "createdAt": "2024-02-01T00:00:00Z",
+            },
+            {
+                "number": 30,
+                "repository": "Equinor/no-longer-on-team",
+                "createdAt": "2024-03-01T00:00:00Z",
+            },
+        ]
+        current_pr = {
+            "number": 11,
+            "repository": "Equinor/good",
+            "createdAt": "2024-04-01T00:00:00Z",
+        }
+
+        def fetch(repo):
+            if repo == "Equinor/bad":
+                raise RuntimeError("API rate limit exceeded")
+            return [current_pr]
+
+        with (
+            patch(
+                "pr_watcher.github.fetch_team_repos",
+                return_value=["Equinor/good", "Equinor/bad"],
+            ),
+            patch("pr_watcher.github.fetch_prs_for_repo", side_effect=fetch),
+        ):
+            result = github.fetch_all_team_prs(
+                "Equinor",
+                "my-team",
+                cached_prs,
+                failed_repos,
+            )
+
+        assert failed_repos == ["Equinor/bad"]
+        assert [
+            (pr["repository"], pr["number"])
+            for pr in result
+        ] == [
+            ("Equinor/good", 11),
+            ("Equinor/bad", 20),
+        ]

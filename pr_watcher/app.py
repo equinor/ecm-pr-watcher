@@ -344,6 +344,7 @@ class PRWatcherApp(App):
         self._unread_comment_updates: set[tuple[str, int]] = set()
         self._loading: bool = False
         self._error: Optional[str] = None
+        self._failed_repo_count: int = 0
         self._last_updated: Optional[datetime] = None
         self._next_refresh: Optional[datetime] = None
         self._col_keys: dict[str, object] = {}  # populated in on_mount
@@ -546,8 +547,15 @@ class PRWatcherApp(App):
     # ------------------------------------------------------------------
 
     @work(thread=True, exclusive=True, name="fetch-prs")
-    def _fetch_prs(self) -> list[dict]:
-        return github.fetch_all_team_prs(self.config.org, self.config.team_slug)
+    def _fetch_prs(self) -> tuple[list[dict], int]:
+        failed_repos: list[str] = []
+        prs = github.fetch_all_team_prs(
+            self.config.org,
+            self.config.team_slug,
+            list(self._prs),
+            failed_repos,
+        )
+        return prs, len(failed_repos)
 
     @work(
         thread=True,
@@ -592,7 +600,7 @@ class PRWatcherApp(App):
             return
 
         if event.state == WorkerState.SUCCESS:
-            new_prs: list[dict] = event.worker.result or []
+            new_prs, failed_repo_count = event.worker.result
             new_identities = {self._pr_identity(pr) for pr in new_prs}
             new_comment_counts = {
                 self._pr_identity(pr): comment_count(pr) for pr in new_prs
@@ -613,6 +621,7 @@ class PRWatcherApp(App):
             self._known_prs = new_identities
             self._prs = order_prs(new_prs, self.config.sort)
             self._error = None
+            self._failed_repo_count = failed_repo_count
             self._loading = False
             self._last_updated = datetime.now()
             self._next_refresh = datetime.now() + timedelta(
@@ -809,6 +818,9 @@ class PRWatcherApp(App):
                 parts.append("⚠ No internet connection — retrying")
             elif self._prs:
                 parts.append("⚠ Refresh error — showing stale data")
+        elif self._failed_repo_count:
+            suffix = "repo stale" if self._failed_repo_count == 1 else "repos stale"
+            parts.append(f"⚠ {self._failed_repo_count} {suffix}")
 
         self.query_one("#status-bar", Static).update("  │  ".join(parts))
 
