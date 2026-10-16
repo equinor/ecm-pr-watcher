@@ -547,7 +547,11 @@ class PRWatcherApp(App):
 
     @work(thread=True, exclusive=True, name="fetch-prs")
     def _fetch_prs(self) -> list[dict]:
-        return github.fetch_all_team_prs(self.config.org, self.config.team_slug)
+        return github.fetch_all_team_prs(
+            self.config.org,
+            self.config.team_slug,
+            list(self._prs),
+        )
 
     @work(
         thread=True,

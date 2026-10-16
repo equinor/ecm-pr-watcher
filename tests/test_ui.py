@@ -456,6 +456,37 @@ async def test_comment_increase_marked_until_row_selected():
             assert table.get_cell(row_key, app._col_keys["comments"]) == "2"
 
 
+async def test_failed_refresh_keeps_rows_and_recovery_does_not_ring_bell():
+    cached_inputs = []
+
+    def fetch(_org, _team_slug, cached_prs):
+        cached_inputs.append(deepcopy(cached_prs))
+        if len(cached_inputs) == 2:
+            return list(cached_prs)
+        return deepcopy(MOCK_PRS)
+
+    app = PRWatcherApp(Config(org="Equinor"))
+    with (
+        patch("pr_watcher.github.fetch_all_team_prs", side_effect=fetch),
+        patch.object(app, "bell") as bell,
+    ):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            expected_rows = [app._row_key(pr) for pr in MOCK_PRS]
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+            assert _row_keys(app) == expected_rows
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+            assert _row_keys(app) == expected_rows
+
+    assert cached_inputs[0] == []
+    assert cached_inputs[1] == MOCK_PRS
+    bell.assert_not_called()
+
+
 async def test_duplicate_pr_numbers_use_repository_identity():
     """PRs with the same number remain distinct across repositories."""
     initial_pr = deepcopy(MOCK_PRS[0])
