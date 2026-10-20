@@ -459,7 +459,7 @@ async def test_comment_increase_marked_until_row_selected():
 async def test_failed_refresh_keeps_rows_and_recovery_does_not_ring_bell():
     cached_inputs = []
 
-    def fetch(_org, _team_slug, cached_prs, failed_repos):
+    def fetch(_org, _team_slug, cached_prs, failed_repos, _ignore_repos):
         cached_inputs.append(deepcopy(cached_prs))
         if len(cached_inputs) == 2:
             failed_repos.extend(["Equinor/repo-a", "Equinor/repo-b"])

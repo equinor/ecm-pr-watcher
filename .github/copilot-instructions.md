@@ -13,7 +13,7 @@
 ```
 pr_watcher/
   app.py       # PRWatcherApp — Textual App subclass, all UI logic
-  config.py    # Config dataclass + argparse (--org, --team, --team-slug, --interval, --bell) + optional git-ignored pr-watcher.json
+  config.py    # Config dataclass + argparse (--org, --team, --team-slug, --interval, --bell, --ignore-repo) + optional git-ignored pr-watcher.json layered over committed pr-watcher.defaults.json
   github.py    # gh CLI wrapper: fetch team repos + concurrent PR fetching
   ignores.py   # load/save/prune temporarily ignored PRs in git-ignored pr-watcher-state.json
 main.py        # thin entry point
