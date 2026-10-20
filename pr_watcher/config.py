@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SETTINGS_FILE = Path(__file__).resolve().parent.parent / "pr-watcher.json"
+DEFAULTS_FILE = SETTINGS_FILE.with_name("pr-watcher.defaults.json")
 STATE_FILE = SETTINGS_FILE.with_name("pr-watcher-state.json")
 _SETTING_TYPES: dict[str, type] = {
     "org": str,
@@ -17,6 +18,7 @@ _SETTING_TYPES: dict[str, type] = {
     "bell": bool,
     "sort": str,
     "ignore_days": int,
+    "ignore_repos": list,
 }
 _SETTING_CHOICES: dict[str, tuple[str, ...]] = {
     "sort": ("created", "priority", "updated"),
@@ -34,6 +36,7 @@ class Config:
     bell: bool = True
     sort: str = "created"
     ignore_days: int = 14
+    ignore_repos: list[str] = field(default_factory=list)
     state_file: Path | None = None
 
     def __post_init__(self) -> None:
@@ -69,6 +72,8 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
             raise ValueError(f"{path}: unknown setting '{key}' (allowed: {allowed})")
         if type(value) is not expected:
             raise ValueError(f"{path}: '{key}' must be {expected.__name__}")
+        if expected is list and not all(isinstance(v, str) and v.strip() for v in value):
+            raise ValueError(f"{path}: '{key}' must be a list of non-empty strings")
         choices = _SETTING_CHOICES.get(key)
         if choices and value not in choices:
             raise ValueError(f"{path}: '{key}' must be one of: {', '.join(choices)}")
@@ -79,6 +84,11 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
         if maximum is not None and value > maximum:
             raise ValueError(f"{path}: '{key}' must be at most {maximum}")
     return data
+
+
+def load_defaults() -> dict:
+    """Read the committed shared defaults that local pr-watcher.json overrides."""
+    return load_settings(DEFAULTS_FILE)
 
 
 def parse_args() -> Config:
@@ -122,15 +132,26 @@ def parse_args() -> Config:
         action=argparse.BooleanOptionalAction,
         help="Ring terminal bell when new PRs appear (default: on). Use --no-bell to disable.",
     )
+    parser.add_argument(
+        "--ignore-repo",
+        action="append",
+        dest="cli_ignore_repos",
+        metavar="REPO",
+        help="Skip a repository (name or owner/name). Repeatable; adds to the configured 'ignore_repos' list",
+    )
 
     args = parser.parse_args()
     try:
-        settings = load_settings()
+        settings = {**load_defaults(), **load_settings()}
     except ValueError as exc:
         parser.error(str(exc))
     if "interval" in settings:
         settings["refresh_interval"] = settings.pop("interval")
-    settings.update(vars(args))
+    cli_args = vars(args)
+    cli_ignore_repos = cli_args.pop("cli_ignore_repos", [])
+    settings.update(cli_args)
+    if cli_ignore_repos:
+        settings["ignore_repos"] = [*settings.get("ignore_repos", []), *cli_ignore_repos]
     if not settings.get("org", "").strip():
         parser.error("the following arguments are required: --org (or 'org' in pr-watcher.json)")
     return Config(**settings)

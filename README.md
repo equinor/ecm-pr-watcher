@@ -55,6 +55,7 @@ python main.py --org <GITHUB_ORG>
 | `--team-slug SLUG` | *(derived from `--team`)* | GitHub team slug — auto-derived if omitted |
 | `--interval SECONDS` | `60` | Auto-refresh interval in seconds |
 | `--bell` / `--no-bell` | `--bell` (on) | Ring terminal bell when new PRs appear |
+| `--ignore-repo REPO` | *(none)* | Skip a repository (`name` or `owner/name`). Repeatable; adds to `ignore_repos` |
 
 ### Examples
 
@@ -111,7 +112,7 @@ changes.
 
 ## Configuration
 
-All CLI options and display preferences can be set in a local `pr-watcher.json` file in the repository root. Command-line flags override the corresponding file settings; omitted settings use the defaults above. This file is ignored by git. If it is missing, pass at least `--org` on the command line. To get started, copy `pr-watcher.example.json`:
+All CLI options and display preferences can be set in a local `pr-watcher.json` file in the repository root. Settings are applied in this order, with later sources overriding earlier ones: built-in defaults, the committed shared defaults in `pr-watcher.defaults.json`, your local `pr-watcher.json`, then command-line flags. Each local setting replaces the shared default for that key. `pr-watcher.json` is ignored by git. If it is missing, pass at least `--org` on the command line. To get started, copy `pr-watcher.example.json`:
 
 ```bash
 cp pr-watcher.example.json pr-watcher.json
@@ -132,14 +133,15 @@ python main.py
 | `bell` | `true` | Ring terminal bell when new PRs appear; use `false` for `--no-bell` |
 | `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"updated"` shows the most recently changed PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
 | `ignore_days` | `14` | How many days a PR stays hidden after you press `i` on it. Must be a whole number from 1 to 3650. |
+| `ignore_repos` | `[]` (shared defaults: `["iso-datamodell"]`) | Repositories to skip entirely, given as `name` or `owner/name` (case-insensitive). Setting this in `pr-watcher.json` replaces the shared default list; use `[]` to watch all repositories. `--ignore-repo` adds to this list. |
 
-The app refuses to start if the file contains invalid JSON, unknown settings, or wrong value types.
+The app refuses to start if `pr-watcher.defaults.json` or `pr-watcher.json` contains invalid JSON, unknown settings, or wrong value types.
 
 Ignored PRs are saved in `pr-watcher-state.json` in the repository root. The app manages this file and git ignores it. An ignored PR reappears automatically when its ignore period ends. If the file becomes unreadable, the app shows a warning, starts with no ignored PRs, and overwrites the file the next time you ignore a PR.
 
 **How the app works:**
 
-1. Uses `gh api` to list all repositories the target team has access to.
+1. Uses `gh api` to list all repositories the target team has access to, skipping any repositories matched by `ignore_repos`.
 2. For each repository, runs GraphQL PR queries concurrently (up to 5 parallel calls) to fetch open PRs.
 3. Refreshes automatically at the configured interval.
 4. Retains previous rows for repositories whose refresh fails and marks them as stale.

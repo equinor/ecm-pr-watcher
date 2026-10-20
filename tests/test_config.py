@@ -14,6 +14,7 @@ class TestParseArgs:
     def default_args_and_settings(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["pr-watcher"])
         monkeypatch.setattr(config_module, "load_settings", lambda: {})
+        monkeypatch.setattr(config_module, "load_defaults", lambda: {})
 
     def test_cli_only_uses_existing_defaults(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["pr-watcher", "--org", "Equinor"])
@@ -138,6 +139,45 @@ class TestParseArgs:
         monkeypatch.setattr(config_module, "load_settings", lambda: {"sort": "priority"})
         assert parse_args().sort == "priority"
 
+    @pytest.mark.parametrize(
+        ("local_settings", "expected"),
+        [
+            ({}, ["iso-datamodell", "a", "Equinor/b"]),
+            ({"ignore_repos": ["x"]}, ["x", "a", "Equinor/b"]),
+            ({"ignore_repos": []}, ["a", "Equinor/b"]),
+        ],
+    )
+    def test_cli_ignore_repo_adds_to_effective_list(self, monkeypatch, local_settings, expected):
+        monkeypatch.setattr(
+            config_module, "load_defaults", lambda: {"ignore_repos": ["iso-datamodell"]}
+        )
+        monkeypatch.setattr(
+            config_module, "load_settings", lambda: {"org": "Equinor", **local_settings}
+        )
+        monkeypatch.setattr(
+            "sys.argv", ["pr-watcher", "--ignore-repo", "a", "--ignore-repo", "Equinor/b"]
+        )
+        assert parse_args().ignore_repos == expected
+
+    def test_local_settings_override_defaults_per_key(self, monkeypatch):
+        monkeypatch.setattr(
+            config_module, "load_defaults", lambda: {"org": "Equinor", "interval": 30, "sort": "priority"}
+        )
+        monkeypatch.setattr(config_module, "load_settings", lambda: {"interval": 90})
+        cfg = parse_args()
+        assert (cfg.org, cfg.refresh_interval, cfg.sort) == ("Equinor", 90, "priority")
+
+    def test_invalid_defaults_stop_startup(self, monkeypatch, capsys):
+        def broken() -> dict:
+            raise ValueError("pr-watcher.defaults.json: unknown setting 'x'")
+
+        monkeypatch.setattr("sys.argv", ["pr-watcher", "--org", "Equinor"])
+        monkeypatch.setattr(config_module, "load_defaults", broken)
+        with pytest.raises(SystemExit) as exc:
+            parse_args()
+        assert exc.value.code == 2
+        assert "pr-watcher.defaults.json" in capsys.readouterr().err
+
     def test_invalid_settings_stop_startup(self, monkeypatch, capsys):
         def broken() -> dict:
             raise ValueError("pr-watcher.json: unknown setting 'x'")
@@ -183,6 +223,7 @@ class TestConfig:
         assert cfg.bell is True
         assert cfg.sort == "created"
         assert cfg.ignore_days == 14
+        assert cfg.ignore_repos == []
 
     def test_state_file_defaults_next_to_settings(self, isolated_state_file):
         assert Config(org="Equinor").state_file == isolated_state_file
@@ -249,6 +290,9 @@ class TestLoadSettings:
             ('{"interval": true}', "must be int"),
             ('{"bell": "false"}', "must be bool"),
             ('{"bell": 0}', "must be bool"),
+            ('{"ignore_repos": "repo"}', "must be list"),
+            ('{"ignore_repos": [1]}', "list of non-empty strings"),
+            ('{"ignore_repos": [" "]}', "list of non-empty strings"),
         ],
     )
     def test_invalid_content_raises(self, tmp_path, content, message):

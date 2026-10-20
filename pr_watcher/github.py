@@ -152,18 +152,34 @@ def fetch_prs_for_repo(repo: str) -> list[dict]:
     return prs
 
 
+def is_repo_ignored(repo: str, ignore_repos: list[str]) -> bool:
+    """Match `owner/name` against entries given as `name` or `owner/name`, case-insensitively."""
+    full = repo.lower()
+    name = full.split("/", 1)[-1]
+    for entry in ignore_repos:
+        entry = entry.strip().lower()
+        if entry == full or ("/" not in entry and entry == name):
+            return True
+    return False
+
+
 def fetch_all_team_prs(
     org: str,
     team_slug: str,
     cached_prs: Optional[list[dict]] = None,
     failed_repos: Optional[list[str]] = None,
+    ignore_repos: Optional[list[str]] = None,
 ) -> list[dict]:
     """
     Fetch all open PRs across every repo the team has access to.
     Uses up to 5 concurrent GitHub API calls.
     Per-repo errors reuse cached PRs and are added to `failed_repos` when provided.
+    Repos matching `ignore_repos` are skipped entirely.
     """
-    repos = fetch_team_repos(org, team_slug)
+    repos = [
+        r for r in fetch_team_repos(org, team_slug)
+        if not is_repo_ignored(r, ignore_repos or [])
+    ]
     cached_by_repo: dict[str, list[dict]] = {}
     for pr in cached_prs or []:
         repo = pr.get("repository")

@@ -554,6 +554,7 @@ class PRWatcherApp(App):
             self.config.team_slug,
             list(self._prs),
             failed_repos,
+            self.config.ignore_repos,
         )
         return prs, len(failed_repos)
 

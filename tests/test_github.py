@@ -207,6 +207,18 @@ class TestFetchAllTeamPrs:
         assert result[0]["number"] == 2
         assert result[1]["number"] == 1
 
+    def test_ignored_repos_are_not_fetched(self):
+        repos = ["Equinor/keep", "Equinor/ISO-Datamodell", "Other/skip-full", "Equinor/skip-full"]
+        with (
+            patch("pr_watcher.github.fetch_team_repos", return_value=repos),
+            patch("pr_watcher.github.fetch_prs_for_repo", return_value=[]) as fetch,
+        ):
+            github.fetch_all_team_prs(
+                "Equinor", "my-team", ignore_repos=["iso-datamodell", "other/skip-full"]
+            )
+        fetched = sorted(call.args[0] for call in fetch.call_args_list)
+        assert fetched == ["Equinor/keep", "Equinor/skip-full"]
+
     def test_per_repo_errors_are_swallowed(self):
         with patch("pr_watcher.github.fetch_team_repos", return_value=["Equinor/good", "Equinor/bad"]):
             good_prs = [
