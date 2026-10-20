@@ -45,6 +45,13 @@ query($owner: String!, $name: String!, $endCursor: String) {
         updatedAt
         url
         isDraft
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup { state }
+            }
+          }
+        }
         headRefName
         totalCommentsCount
       }

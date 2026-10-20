@@ -144,6 +144,20 @@ def format_review_status(pr: dict) -> str:
     }.get(decision, "— No Reviews")
 
 
+def format_pr_status(pr: dict) -> Text:
+    commits = pr.get("commits", {}).get("nodes", [])
+    rollup = commits[-1]["commit"].get("statusCheckRollup") if commits else None
+    color = {
+        "SUCCESS": "green",
+        "FAILURE": "red",
+        "ERROR": "red",
+    }.get((rollup or {}).get("state"), "")
+    return Text.assemble(
+        ("●" if color else " ", color),
+        f" {format_review_status(pr)}",
+    )
+
+
 def pr_priority(pr: dict) -> int:
     """Rank for the priority sort; lower values are shown first."""
     if pr.get("isDraft"):
@@ -381,7 +395,7 @@ class PRWatcherApp(App):
             "title": 999,
             "author": 20,
             "reviewers": 30,
-            "review": 16,
+            "review": 18,
             "age": 6,
             "updated": 11,
             "comments": 8,
@@ -395,7 +409,7 @@ class PRWatcherApp(App):
             w["title"]  = max(w["title"],  len(pr.get("title", "")))
             w["author"] = max(w["author"], len(pr.get("author", {}).get("login", "")))
             w["reviewers"] = max(w["reviewers"], len(format_reviewers(pr)))
-            w["review"] = max(w["review"], len(format_review_status(pr)))
+            w["review"] = max(w["review"], cell_len(format_pr_status(pr).plain))
             w["age"]    = max(w["age"],    len(self._age_display(pr)))
             w["updated"] = max(w["updated"], len(format_age(pr.get("updatedAt", ""))))
             w["comments"] = max(w["comments"], len(str(comment_count(pr))) + 1)
@@ -487,7 +501,13 @@ class PRWatcherApp(App):
         yield Static(self._header_text(), id="app-header")
         yield LoadingIndicator(id="loading")
         yield Static("", id="error-panel")
-        yield PRTable(id="pr-table", cursor_type="row", zebra_stripes=True, show_row_labels=False)
+        yield PRTable(
+            id="pr-table",
+            cursor_type="row",
+            cursor_foreground_priority="renderable",
+            zebra_stripes=True,
+            show_row_labels=False,
+        )
         yield Static("Starting…", id="status-bar")
         yield Footer()
 
@@ -498,7 +518,7 @@ class PRWatcherApp(App):
         self._col_keys["title"]  = table.add_column("Title",        width=48)
         self._col_keys["author"] = table.add_column("Author",       width=15)
         self._col_keys["reviewers"] = table.add_column("Reviewers", width=30)
-        self._col_keys["review"] = table.add_column("Review Status",width=16)
+        self._col_keys["review"] = table.add_column("Review Status",width=18)
         self._col_keys["age"]    = table.add_column("Age",          width=5)
         self._col_keys["updated"] = table.add_column("Last change", width=11)
         self._col_keys["comments"] = table.add_column("Comments",   width=8)
@@ -767,7 +787,7 @@ class PRWatcherApp(App):
                 pr.get("title", ""),
                 pr.get("author", {}).get("login", ""),
                 format_reviewers(pr),
-                format_review_status(pr),
+                format_pr_status(pr),
                 self._age_display(pr),
                 format_age(pr.get("updatedAt", "")),
                 self._comment_display(pr),
