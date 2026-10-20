@@ -95,6 +95,9 @@ class TestFetchPrsForRepo:
                 "title": "Fix bug",
                 "labels": {"nodes": [{"name": "bug"}]},
                 "totalCommentsCount": 4,
+                "commits": {"nodes": [
+                    {"commit": {"statusCheckRollup": {"state": "SUCCESS"}}},
+                ]},
                 "reviewRequests": {"nodes": [
                     {"requestedReviewer": {"login": "alice"}},
                     {"requestedReviewer": {"slug": "my-team"}},
@@ -119,12 +122,15 @@ class TestFetchPrsForRepo:
         assert len(result) == 2
         assert result[0]["labels"] == [{"name": "bug"}]
         assert result[0]["totalCommentsCount"] == 4
+        assert result[0]["commits"] == prs[0]["commits"]
         assert result[0]["reviewRequests"] == prs[0]["reviewRequests"]
         assert result[0]["latestReviews"] == prs[0]["latestReviews"]
         command = run.call_args.args[0]
         query_arg = next(arg for arg in command if arg.startswith("query="))
         assert "totalCommentsCount" in query_arg
         assert "updatedAt" in query_arg
+        assert "commits(last: 1)" in query_arg
+        assert "statusCheckRollup { state }" in query_arg
         assert "reviewRequests(first: 100)" in query_arg
         assert "... on Team { slug }" in query_arg
         assert "... on User { login }" in query_arg

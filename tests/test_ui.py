@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from rich.cells import cell_len
+from rich.color import Color
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.events import Click, MouseScrollDown, MouseScrollUp
@@ -49,6 +50,9 @@ MOCK_PRS = [
             {"author": {"login": "charlie"}, "state": "COMMENTED"},
         ]},
         "reviewDecision": "APPROVED",
+        "commits": {"nodes": [
+            {"commit": {"statusCheckRollup": {"state": "SUCCESS"}}},
+        ]},
         "isDraft": False,
         "createdAt": _iso(timedelta(days=2)),
         "updatedAt": _iso(timedelta(hours=2)),
@@ -62,6 +66,9 @@ MOCK_PRS = [
         "repository": "Equinor/ecm-iso-wp-gl0560-api-iac",
         "author": {"login": "bob-long-username"},
         "reviewDecision": "REVIEW_REQUIRED",
+        "commits": {"nodes": [
+            {"commit": {"statusCheckRollup": {"state": "PENDING"}}},
+        ]},
         "isDraft": False,
         "createdAt": _iso(timedelta(days=5)),
         "updatedAt": _iso(timedelta(days=1)),
@@ -75,6 +82,9 @@ MOCK_PRS = [
         "repository": "Equinor/ecm-wo-preparation-service",
         "author": {"login": "charlie"},
         "reviewDecision": "CHANGES_REQUESTED",
+        "commits": {"nodes": [
+            {"commit": {"statusCheckRollup": {"state": "FAILURE"}}},
+        ]},
         "isDraft": False,
         "createdAt": _iso(timedelta(hours=3)),
         "updatedAt": _iso(timedelta(minutes=30)),
@@ -162,6 +172,54 @@ async def test_reviewers_column_next_to_author():
             await pilot.pause(0.2)
             assert table.columns[app._col_keys["reviewers"]].width < 30
             assert table.virtual_size.width <= table.size.width
+
+
+async def test_status_column_shows_checks_and_updates_on_refresh():
+    prs = deepcopy(MOCK_PRS)
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=prs):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            column = app._col_keys["review"]
+            for pr, expected, color in zip(prs, [
+                "● ✓ Approved", "  ⏳ Review Needed", "● ✗ Changes Req.",
+            ], ["green", None, "red"]):
+                status = table.get_cell(app._row_key(pr), column)
+                assert isinstance(status, Text)
+                assert status.plain == expected
+                assert [(span.start, span.end, span.style) for span in status.spans] == (
+                    [(0, 1, color)] if color else []
+                )
+                assert cell_len(status.plain) <= table.columns[column].width
+
+            prs[1]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] = "SUCCESS"
+            app.action_refresh()
+            await pilot.pause(0.5)
+            status = table.get_cell(app._row_key(prs[1]), column)
+            assert status.plain == "● ⏳ Review Needed"
+            assert status.spans[0].style == "green"
+
+
+async def test_checks_indicator_keeps_color_on_highlighted_row():
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            table.focus()
+            for row, color in [(0, "green"), (2, "red")]:
+                table.move_cursor(row=row)
+                await pilot.pause()
+                circle = next(
+                    segment
+                    for segment in table.render_line(row + table.header_height)
+                    if "●" in segment.text
+                )
+                assert circle.style.color == Color.parse(color)
+                assert circle.style.bgcolor == table.get_component_rich_style(
+                    "datatable--cursor",
+                ).bgcolor
 
 
 async def test_last_change_column_uses_updated_timestamp():

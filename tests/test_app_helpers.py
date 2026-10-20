@@ -11,6 +11,7 @@ from pr_watcher.app import (
     ellipsis_middle,
     format_age,
     format_labels,
+    format_pr_status,
     format_review_status,
     format_reviewers,
     order_prs,
@@ -239,6 +240,49 @@ class TestFormatReviewStatus:
 
     def test_draft_takes_priority_over_decision(self):
         assert format_review_status({"isDraft": True, "reviewDecision": "APPROVED"}) == "◌ Draft"
+
+
+class TestFormatPrStatus:
+    @pytest.mark.parametrize(("state", "color"), [
+        ("SUCCESS", "green"),
+        ("FAILURE", "red"),
+        ("ERROR", "red"),
+        ("PENDING", None),
+        ("EXPECTED", None),
+        ("UNKNOWN", None),
+        (None, None),
+    ])
+    def test_checks_indicator_preserves_review_status(self, state, color):
+        pr = {
+            "reviewDecision": "APPROVED",
+            "commits": {"nodes": [
+                {"commit": {"statusCheckRollup": {"state": state}}},
+            ]},
+        }
+        status = format_pr_status(pr)
+        assert status.plain == ("●" if color else " ") + " ✓ Approved"
+        assert [(span.start, span.end, span.style) for span in status.spans] == (
+            [(0, 1, color)] if color else []
+        )
+
+    @pytest.mark.parametrize("pr", [
+        {},
+        {"commits": {"nodes": []}},
+        {"commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}},
+    ])
+    def test_missing_checks_leave_space(self, pr):
+        status = format_pr_status(pr)
+        assert status.plain == "  — No Reviews"
+        assert not status.spans
+
+    def test_draft_still_shows_check_result(self):
+        pr = {
+            "isDraft": True,
+            "commits": {"nodes": [
+                {"commit": {"statusCheckRollup": {"state": "FAILURE"}}},
+            ]},
+        }
+        assert format_pr_status(pr).plain == "● ◌ Draft"
 
 
 # ---------------------------------------------------------------------------

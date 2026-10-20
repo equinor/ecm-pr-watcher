@@ -102,6 +102,13 @@ Copilot reviewers are excluded from this column.
 The column is capped at 30 characters and shrinks on narrower terminals to
 preserve space for the title.
 
+## PR checks
+
+The **Review Status** column starts with a green circle when checks on the PR's
+latest commit succeed, or a red circle when they fail or report an error.
+The indicator stays blank while checks are running, pending, unavailable, or
+indeterminate. The review status text remains beside it.
+
 ## Last change
 
 The **Last change** column shows how long it has been since GitHub last updated
