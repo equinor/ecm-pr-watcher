@@ -135,13 +135,13 @@ def format_age(created_at: str) -> str:
 
 def format_review_status(pr: dict) -> str:
     if pr.get("isDraft"):
-        return "◌ Draft"
+        return "📝 Draft"
     decision = pr.get("reviewDecision") or ""
     return {
-        "APPROVED": "✓ Approved",
-        "CHANGES_REQUESTED": "✗ Changes Req.",
+        "APPROVED": "✅ Approved",
+        "CHANGES_REQUESTED": "❌ Changes Req.",
         "REVIEW_REQUIRED": "⏳ Review Needed",
-    }.get(decision, "— No Reviews")
+    }.get(decision, "➖ No Reviews")
 
 
 def format_pr_status(pr: dict) -> Text:
@@ -850,6 +850,9 @@ class PRWatcherApp(App):
     # ------------------------------------------------------------------
 
     def _tick(self) -> None:
+        # Textual unmounts widgets before stopping app timers.
+        if not self.is_running:
+            return
         self._update_status_bar()
         if (
             not self._loading

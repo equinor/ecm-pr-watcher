@@ -110,6 +110,9 @@ latest commit succeed, or a red circle when they fail or report an error.
 The indicator stays blank while checks are running, pending, unavailable, or
 indeterminate. The review status text remains beside it.
 
+Review states use equal-width emoji so their labels align: ✅ Approved,
+❌ Changes Req., ⏳ Review Needed, ➖ No Reviews, and 📝 Draft.
+
 ## Last change
 
 The **Last change** column shows how long it has been since GitHub last updated
