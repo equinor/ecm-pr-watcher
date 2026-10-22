@@ -361,6 +361,8 @@ class PRWatcherApp(App):
         self._failed_repo_count: int = 0
         self._last_updated: Optional[datetime] = None
         self._next_refresh: Optional[datetime] = None
+        self._rate_limit_until: Optional[datetime] = None
+        self._rate_limit_attempts: int = 0
         self._col_keys: dict[str, object] = {}  # populated in on_mount
         self._last_opened_url: Optional[str] = None
         self._last_opened_at: Optional[float] = None
@@ -555,6 +557,13 @@ class PRWatcherApp(App):
         self.query_one("#pr-table").display = state == "table"
 
     def _start_fetch(self) -> None:
+        if self._loading:
+            return
+        if self._rate_limit_until and datetime.now(timezone.utc) < self._rate_limit_until:
+            self._update_status_bar()
+            return
+        self._rate_limit_until = None
+        self._next_refresh = None
         self._loading = True
         # Keep existing table visible during background refresh (if we have data)
         if not self._prs:
@@ -566,7 +575,7 @@ class PRWatcherApp(App):
     # Worker — runs gh calls in a thread pool
     # ------------------------------------------------------------------
 
-    @work(thread=True, exclusive=True, name="fetch-prs")
+    @work(thread=True, exclusive=True, exit_on_error=False, name="fetch-prs")
     def _fetch_prs(self) -> tuple[list[dict], int]:
         failed_repos: list[str] = []
         prs = github.fetch_all_team_prs(
@@ -642,10 +651,11 @@ class PRWatcherApp(App):
             self._known_prs = new_identities
             self._prs = order_prs(new_prs, self.config.sort)
             self._error = None
+            self._rate_limit_attempts = 0
             self._failed_repo_count = failed_repo_count
             self._loading = False
             self._last_updated = datetime.now()
-            self._next_refresh = datetime.now() + timedelta(
+            self._next_refresh = datetime.now(timezone.utc) + timedelta(
                 seconds=self.config.refresh_interval
             )
             self._rebuild_table()
@@ -655,8 +665,28 @@ class PRWatcherApp(App):
         elif event.state == WorkerState.ERROR:
             self._error = str(event.worker.error)
             self._loading = False
-            self._last_updated = datetime.now()
-            self._next_refresh = datetime.now() + timedelta(
+            if isinstance(event.worker.error, github.RateLimitError):
+                self._rate_limit_attempts += 1
+                retry_at = event.worker.error.retry_at
+                now = datetime.now(timezone.utc)
+                if retry_at is not None:
+                    retry_at = retry_at.astimezone(timezone.utc)
+                if retry_at is None or retry_at <= now:
+                    delay = min(3600, 60 * 2 ** min(self._rate_limit_attempts - 1, 6))
+                    retry_at = now + timedelta(seconds=delay)
+                self._rate_limit_until = retry_at + timedelta(seconds=1)
+                self._next_refresh = self._rate_limit_until
+                if self._prs:
+                    self._set_view("table")
+                else:
+                    self.query_one("#error-panel", Static).update(
+                        "GitHub API rate limited.\n\n"
+                        "Refresh is paused and will resume automatically."
+                    )
+                    self._set_view("error")
+                self._update_status_bar()
+                return
+            self._next_refresh = datetime.now(timezone.utc) + timedelta(
                 seconds=self.config.refresh_interval
             )
 
@@ -809,6 +839,15 @@ class PRWatcherApp(App):
     def _update_status_bar(self) -> None:
         parts: list[str] = []
 
+        if self._rate_limit_until:
+            secs = max(
+                0, int((self._rate_limit_until - datetime.now(timezone.utc)).total_seconds())
+            )
+            parts.append(
+                f"Rate limited - refresh paused until "
+                f"{self._rate_limit_until.astimezone():%H:%M:%S} ({secs}s)"
+            )
+
         if self._show_ignored:
             n = len(self._visible_prs)
             parts.append(
@@ -829,11 +868,16 @@ class PRWatcherApp(App):
         if self._last_updated:
             parts.append(f"Updated {self._last_updated.strftime('%H:%M:%S')}")
 
-        if not self._loading and self._next_refresh:
-            secs = max(0, int((self._next_refresh - datetime.now()).total_seconds()))
+        if not self._loading and self._next_refresh and not self._rate_limit_until:
+            secs = max(
+                0, int((self._next_refresh - datetime.now(timezone.utc)).total_seconds())
+            )
             parts.append(f"Refresh in {secs}s")
 
-        if self._error:
+        if self._rate_limit_until:
+            if self._prs:
+                parts.append("Showing stale data")
+        elif self._error:
             error_lc = self._error.lower()
             if any(x in error_lc for x in _CONNECTIVITY_MARKERS):
                 parts.append("⚠ No internet connection — retrying")
@@ -857,7 +901,7 @@ class PRWatcherApp(App):
         if (
             not self._loading
             and self._next_refresh is not None
-            and datetime.now() >= self._next_refresh
+            and datetime.now(timezone.utc) >= self._next_refresh
         ):
             self._next_refresh = None
             self._start_fetch()
@@ -888,7 +932,6 @@ class PRWatcherApp(App):
 
     def action_refresh(self) -> None:
         if not self._loading:
-            self._next_refresh = None
             self._start_fetch()
 
     def action_check_update(self) -> None:

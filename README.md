@@ -75,7 +75,7 @@ python main.py --org Equinor --team-slug ecm-wo-preparation
 | Key | Action |
 |-----|--------|
 | `q` | Quit the application |
-| `r` | Force an immediate refresh |
+| `r` | Force an immediate refresh, unless rate-limited |
 | `u` | Check the current Git branch for updates and restart if it changed |
 | `Enter` | Open the selected PR in the default browser |
 | `i` | Ignore the selected PR for `ignore_days` days. In the ignored view the footer label changes to **Restore PR** and `i` restores it |
@@ -112,6 +112,29 @@ indeterminate. The review status text remains beside it.
 
 Review states use equal-width emoji so their labels align: ✅ Approved,
 ❌ Changes Req., ⏳ Review Needed, ➖ No Reviews, and 📝 Draft.
+
+## Rate limits
+
+When GitHub rate-limits a refresh, the app keeps the previous PR rows visible
+and pauses both automatic refreshes and the `r` shortcut. The status bar shows
+**Rate limited - refresh paused until HH:MM:SS**, using local time, with a
+countdown. Refresh resumes automatically after the cooldown.
+
+The app reads GitHub's `x-ratelimit-reset` timestamp when the primary quota is
+exhausted and honors `Retry-After` for secondary limits. If both apply, it waits
+for the later time. Without usable timing information, it waits at least one
+minute, doubling that delay on consecutive rate-limited refreshes up to one hour.
+A successful refresh resets that backoff. Rate limits during team-repository
+discovery are handled the same way as those during PR fetching. Requests already
+in flight may finish, and the latest retry deadline from their responses is
+honored. No further repositories are scheduled after a rate limit is detected.
+
+GitHub has a [REST endpoint for listing PRs](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests)
+with a separate primary quota, but it does not supply all the dashboard's review
+and check metadata in one response. Reproducing that data would require additional
+requests per PR. The app retains GraphQL to preserve those fields; switching to
+REST would not avoid secondary limits shared by both APIs. See
+[GitHub's rate-limit guidance](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
 
 ## Last change
 
