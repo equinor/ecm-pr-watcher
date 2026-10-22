@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
+from rich.cells import cell_len
+
 from pr_watcher.app import (
     ellipsis_middle,
     format_age,
@@ -221,25 +223,36 @@ class TestFormatAge:
 
 class TestFormatReviewStatus:
     def test_draft(self):
-        assert format_review_status({"isDraft": True}) == "◌ Draft"
+        assert format_review_status({"isDraft": True}) == "📝 Draft"
 
     def test_approved(self):
-        assert format_review_status({"isDraft": False, "reviewDecision": "APPROVED"}) == "✓ Approved"
+        assert format_review_status({"isDraft": False, "reviewDecision": "APPROVED"}) == "✅ Approved"
 
     def test_changes_requested(self):
-        assert format_review_status({"isDraft": False, "reviewDecision": "CHANGES_REQUESTED"}) == "✗ Changes Req."
+        assert format_review_status({"isDraft": False, "reviewDecision": "CHANGES_REQUESTED"}) == "❌ Changes Req."
 
     def test_review_required(self):
         assert format_review_status({"isDraft": False, "reviewDecision": "REVIEW_REQUIRED"}) == "⏳ Review Needed"
 
     def test_no_decision(self):
-        assert format_review_status({"isDraft": False, "reviewDecision": None}) == "— No Reviews"
+        assert format_review_status({"isDraft": False, "reviewDecision": None}) == "➖ No Reviews"
 
     def test_missing_keys(self):
-        assert format_review_status({}) == "— No Reviews"
+        assert format_review_status({}) == "➖ No Reviews"
 
     def test_draft_takes_priority_over_decision(self):
-        assert format_review_status({"isDraft": True, "reviewDecision": "APPROVED"}) == "◌ Draft"
+        assert format_review_status({"isDraft": True, "reviewDecision": "APPROVED"}) == "📝 Draft"
+
+    @pytest.mark.parametrize("pr", [
+        {"reviewDecision": "APPROVED"},
+        {"reviewDecision": "CHANGES_REQUESTED"},
+        {"reviewDecision": "REVIEW_REQUIRED"},
+        {},
+        {"isDraft": True},
+    ])
+    def test_icons_use_two_terminal_cells(self, pr):
+        icon, _ = format_review_status(pr).split(" ", 1)
+        assert cell_len(icon) == 2
 
 
 class TestFormatPrStatus:
@@ -260,7 +273,7 @@ class TestFormatPrStatus:
             ]},
         }
         status = format_pr_status(pr)
-        assert status.plain == ("●" if color else " ") + " ✓ Approved"
+        assert status.plain == ("●" if color else " ") + " ✅ Approved"
         assert [(span.start, span.end, span.style) for span in status.spans] == (
             [(0, 1, color)] if color else []
         )
@@ -272,7 +285,7 @@ class TestFormatPrStatus:
     ])
     def test_missing_checks_leave_space(self, pr):
         status = format_pr_status(pr)
-        assert status.plain == "  — No Reviews"
+        assert status.plain == "  ➖ No Reviews"
         assert not status.spans
 
     def test_draft_still_shows_check_result(self):
@@ -282,7 +295,7 @@ class TestFormatPrStatus:
                 {"commit": {"statusCheckRollup": {"state": "FAILURE"}}},
             ]},
         }
-        assert format_pr_status(pr).plain == "● ◌ Draft"
+        assert format_pr_status(pr).plain == "● 📝 Draft"
 
 
 # ---------------------------------------------------------------------------

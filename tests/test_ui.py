@@ -183,7 +183,7 @@ async def test_status_column_shows_checks_and_updates_on_refresh():
             table = app.query_one("#pr-table", PRTable)
             column = app._col_keys["review"]
             for pr, expected, color in zip(prs, [
-                "● ✓ Approved", "  ⏳ Review Needed", "● ✗ Changes Req.",
+                "● ✅ Approved", "  ⏳ Review Needed", "● ❌ Changes Req.",
             ], ["green", None, "red"]):
                 status = table.get_cell(app._row_key(pr), column)
                 assert isinstance(status, Text)
@@ -199,6 +199,56 @@ async def test_status_column_shows_checks_and_updates_on_refresh():
             status = table.get_cell(app._row_key(prs[1]), column)
             assert status.plain == "● ⏳ Review Needed"
             assert status.spans[0].style == "green"
+
+
+async def test_tick_during_shutdown_does_not_update_or_refresh():
+    app = PRWatcherApp(Config(org="Equinor"))
+    close_all = app._close_all
+
+    async def close_all_with_pending_tick() -> None:
+        try:
+            await app.query_one("#status-bar", Static).remove()
+            assert not app.is_running
+            app._next_refresh = datetime.now() - timedelta(seconds=1)
+            app._tick()
+        finally:
+            await close_all()
+
+    with (
+        patch("pr_watcher.github.fetch_all_team_prs", return_value=MOCK_PRS) as fetch,
+        patch.object(app, "_close_all", side_effect=close_all_with_pending_tick),
+    ):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+
+        fetch.assert_called_once()
+
+
+async def test_review_status_labels_align():
+    prs = deepcopy(MOCK_PRS)
+    no_reviews = deepcopy(prs[1])
+    no_reviews.update(number=101, reviewDecision=None)
+    draft = deepcopy(prs[0])
+    draft.update(number=102, isDraft=True)
+    prs.extend([no_reviews, draft])
+    labels = ["Approved", "Review Needed", "Changes Req.", "No Reviews", "Draft"]
+
+    app = PRWatcherApp(Config(org="Equinor"))
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=prs):
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            table = app.query_one("#pr-table", PRTable)
+            column = app._col_keys["review"]
+            label_columns = []
+            for row, (pr, label) in enumerate(zip(prs, labels)):
+                status = table.get_cell(app._row_key(pr), column)
+                assert cell_len(status.plain) <= table.columns[column].width
+                rendered = "".join(
+                    segment.text
+                    for segment in table.render_line(row + table.header_height)
+                )
+                label_columns.append(cell_len(rendered[:rendered.index(label)]))
+            assert len(set(label_columns)) == 1
 
 
 async def test_checks_indicator_keeps_color_on_highlighted_row():
