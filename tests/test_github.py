@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,21 +10,26 @@ import pytest
 from pr_watcher import github
 
 
-def _run_result(stdout="", stderr="", returncode=0):
+def _run_result(stdout="", stderr="", returncode=0, headers=None, status=200):
     m = MagicMock()
-    m.stdout = stdout
+    header_lines = [f"HTTP/2.0 {status}"]
+    header_lines.extend(f"{key}: {value}" for key, value in (headers or {}).items())
+    m.stdout = "\r\n".join(header_lines) + "\r\n\r\n" + stdout
     m.stderr = stderr
     m.returncode = returncode
     return m
 
 
-def _graphql_page(prs):
+def _graphql_page(prs, has_next_page=False, end_cursor=None):
     return {
         "data": {
             "repository": {
                 "pullRequests": {
                     "nodes": prs,
-                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "pageInfo": {
+                        "hasNextPage": has_next_page,
+                        "endCursor": end_cursor,
+                    },
                 }
             }
         }
@@ -115,7 +121,7 @@ class TestFetchPrsForRepo:
         ]
         with patch(
             "pr_watcher.github.subprocess.run",
-            return_value=_run_result(stdout=json.dumps([_graphql_page(prs)])),
+            return_value=_run_result(stdout=json.dumps(_graphql_page(prs))),
         ) as run:
             result = github.fetch_prs_for_repo("Equinor/my-repo")
         assert all(pr["repository"] == "Equinor/my-repo" for pr in result)
@@ -138,22 +144,37 @@ class TestFetchPrsForRepo:
         assert "... on Mannequin { login }" in query_arg
         assert "latestReviews(first: 100)" in query_arg
         assert query_arg == query_arg.strip()
-        assert "--paginate" in command
-        assert "--slurp" in command
+        assert "--include" in command
+        assert "--paginate" not in command
 
     def test_merges_paginated_results(self):
         page1 = _graphql_page([
             {"number": 1, "labels": {"nodes": []}, "totalCommentsCount": 1}
-        ])
+        ], has_next_page=True, end_cursor="next-page")
         page2 = _graphql_page([
             {"number": 2, "labels": {"nodes": []}, "totalCommentsCount": 2}
         ])
         with patch(
             "pr_watcher.github.subprocess.run",
-            return_value=_run_result(stdout=json.dumps([page1, page2])),
-        ):
+            side_effect=[
+                _run_result(stdout=json.dumps(page1)),
+                _run_result(stdout=json.dumps(page2)),
+            ],
+        ) as run:
             result = github.fetch_prs_for_repo("Equinor/my-repo")
         assert [pr["number"] for pr in result] == [1, 2]
+        assert run.call_count == 2
+        assert "endCursor=next-page" in run.call_args.args[0]
+
+    def test_missing_pagination_cursor_raises(self) -> None:
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(
+                stdout=json.dumps(_graphql_page([], has_next_page=True))
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="Missing GraphQL pagination cursor"):
+                github.fetch_prs_for_repo("Equinor/my-repo")
 
     def test_disabled_prs_returns_empty(self):
         with patch("pr_watcher.github.subprocess.run", return_value=_run_result(
@@ -167,6 +188,17 @@ class TestFetchPrsForRepo:
         )):
             with pytest.raises(RuntimeError, match="API rate limit exceeded"):
                 github.fetch_prs_for_repo("Equinor/my-repo")
+
+    def test_graphql_error_is_not_confused_with_pr_content(self) -> None:
+        page = _graphql_page([{"title": "Fix rate limit handling"}])
+        page["errors"] = [{"type": "FORBIDDEN", "message": "Resource not accessible"}]
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(stdout=json.dumps(page)),
+        ):
+            with pytest.raises(RuntimeError, match="Resource not accessible") as exc:
+                github.fetch_prs_for_repo("Equinor/my-repo")
+        assert not isinstance(exc.value, github.RateLimitError)
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +239,7 @@ class TestFetchAllTeamPrs:
         with patch("pr_watcher.github.fetch_team_repos", return_value=["Equinor/repo-a"]):
             with patch(
                 "pr_watcher.github.subprocess.run",
-                return_value=_run_result(stdout=json.dumps([_graphql_page(prs)])),
+                return_value=_run_result(stdout=json.dumps(_graphql_page(prs))),
             ):
                 result = github.fetch_all_team_prs("Equinor", "my-team")
         assert result[0]["number"] == 2
@@ -239,7 +271,7 @@ class TestFetchAllTeamPrs:
                 if "name=bad" in cmd:
                     return _run_result(stderr="unexpected error", returncode=1)
                 return _run_result(
-                    stdout=json.dumps([_graphql_page(good_prs)])
+                    stdout=json.dumps(_graphql_page(good_prs))
                 )
 
             with patch("pr_watcher.github.subprocess.run", side_effect=side_effect):
@@ -299,3 +331,158 @@ class TestFetchAllTeamPrs:
             ("Equinor/good", 11),
             ("Equinor/bad", 20),
         ]
+
+    def test_rate_limit_stops_scheduling_and_is_not_swallowed(self) -> None:
+        error = github.RateLimitError("API rate limit exceeded")
+        with (
+            patch(
+                "pr_watcher.github.fetch_team_repos",
+                return_value=[f"Equinor/repo-{i}" for i in range(10)],
+            ),
+            patch("pr_watcher.github._MAX_CONCURRENT_FETCHES", 1),
+            patch("pr_watcher.github.fetch_prs_for_repo", side_effect=error) as fetch,
+        ):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_all_team_prs("Equinor", "my-team")
+        assert exc.value is error
+        fetch.assert_called_once_with("Equinor/repo-0")
+
+    def test_team_discovery_rate_limit_skips_pr_requests(self) -> None:
+        with (
+            patch(
+                "pr_watcher.github.subprocess.run",
+                return_value=_run_result(
+                    stdout=json.dumps({"message": "API rate limit exceeded"}),
+                    returncode=1,
+                    status=403,
+                    headers={
+                        "X-Ratelimit-Remaining": "0",
+                        "X-Ratelimit-Reset": "1893456000",
+                    },
+                ),
+            ),
+            patch("pr_watcher.github.fetch_prs_for_repo") as fetch,
+        ):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_all_team_prs("Equinor", "my-team")
+        assert exc.value.retry_at == datetime(2030, 1, 1, tzinfo=timezone.utc)
+        fetch.assert_not_called()
+
+
+class TestRateLimits:
+    @pytest.mark.parametrize("returncode", [0, 1])
+    def test_graphql_rate_limit_with_http_200(self, returncode: int) -> None:
+        response = _run_result(
+            stdout=json.dumps({
+                "data": None,
+                "errors": [{"type": "RATE_LIMITED", "message": "Quota exhausted"}],
+            }),
+            returncode=returncode,
+            headers={
+                "X-Ratelimit-Remaining": "0",
+                "X-Ratelimit-Reset": "1893456000",
+            },
+        )
+        with patch("pr_watcher.github.subprocess.run", return_value=response):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_prs_for_repo("Equinor/my-repo")
+        assert exc.value.retry_at == datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("status", [200, 403, 429])
+    def test_secondary_limit_uses_retry_after_not_primary_reset(
+        self, status: int,
+    ) -> None:
+        response = _run_result(
+            stdout=json.dumps({
+                "errors": [{"message": "You have exceeded a secondary rate limit"}],
+            }),
+            status=status,
+            returncode=1,
+            headers={
+                "Retry-After": "120",
+                "X-Ratelimit-Remaining": "4999",
+                "X-Ratelimit-Reset": "1893456000",
+            },
+        )
+        before = datetime.now(timezone.utc)
+        with patch("pr_watcher.github.subprocess.run", return_value=response):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_prs_for_repo("Equinor/my-repo")
+        after = datetime.now(timezone.utc)
+        assert before + timedelta(seconds=120) <= exc.value.retry_at
+        assert exc.value.retry_at <= after + timedelta(seconds=120)
+
+    def test_honors_later_of_primary_reset_and_retry_after(self) -> None:
+        headers = {
+            "retry-after": "120",
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "1893456000",
+        }
+        assert github._rate_limit_retry_at(headers) == datetime(
+            2030, 1, 1, tzinfo=timezone.utc,
+        )
+        headers["x-ratelimit-reset"] = "1"
+        before = datetime.now(timezone.utc)
+        assert github._rate_limit_retry_at(headers) >= before + timedelta(seconds=120)
+
+    @pytest.mark.parametrize("headers", [
+        {},
+        {"x-ratelimit-remaining": "0"},
+        {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "invalid"},
+        {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "99999999999999999999"},
+        {"retry-after": "invalid"},
+        {"retry-after": "99999999999999999999"},
+    ])
+    def test_missing_or_invalid_timing_uses_app_backoff(
+        self, headers: dict[str, str],
+    ) -> None:
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(
+                stderr="API rate limit exceeded", returncode=1, headers=headers,
+            ),
+        ):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_prs_for_repo("Equinor/my-repo")
+        assert exc.value.retry_at is None
+
+    def test_http_429_without_rate_limit_message(self) -> None:
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(
+                stdout='{"message": "Too many requests"}',
+                returncode=1,
+                status=429,
+                headers={"Retry-After": "60"},
+            ),
+        ):
+            with pytest.raises(github.RateLimitError):
+                github.fetch_prs_for_repo("Equinor/my-repo")
+
+    def test_success_using_last_point_is_not_discarded(self) -> None:
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(
+                stdout=json.dumps(_graphql_page([])),
+                headers={
+                    "X-Ratelimit-Remaining": "0",
+                    "X-Ratelimit-Reset": "1893456000",
+                },
+            ),
+        ):
+            assert github.fetch_prs_for_repo("Equinor/my-repo") == []
+
+    def test_later_page_rate_limit_does_not_return_incomplete_list(self) -> None:
+        page = _graphql_page([
+            {"number": 1, "labels": {"nodes": []}},
+        ], has_next_page=True, end_cursor="next")
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            side_effect=[
+                _run_result(stdout=json.dumps(page)),
+                _run_result(stderr="API rate limit exceeded", returncode=1),
+            ],
+        ) as run:
+            with pytest.raises(github.RateLimitError):
+                github.fetch_prs_for_repo("Equinor/my-repo")
+        assert run.call_count == 2

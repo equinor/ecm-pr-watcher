@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime, timedelta, timezone
+from itertools import islice
 from typing import Optional
 
 
@@ -62,6 +63,81 @@ query($owner: String!, $name: String!, $endCursor: String) {
 """.strip()
 
 
+class RateLimitError(RuntimeError):
+    def __init__(self, message: str, retry_at: Optional[datetime] = None) -> None:
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+def _rate_limit_retry_at(headers: dict[str, str]) -> Optional[datetime]:
+    deadlines: list[datetime] = []
+    if headers.get("retry-after", "").isdigit():
+        try:
+            deadlines.append(
+                datetime.now(timezone.utc)
+                + timedelta(seconds=int(headers["retry-after"]))
+            )
+        except OverflowError:
+            pass
+    if headers.get("x-ratelimit-remaining") == "0":
+        try:
+            deadlines.append(
+                datetime.fromtimestamp(int(headers["x-ratelimit-reset"]), timezone.utc)
+            )
+        except (KeyError, ValueError, OverflowError, OSError):
+            pass
+    return max(deadlines) if deadlines else None
+
+
+def _api_json(endpoint: str, *args: str) -> dict | list:
+    result = subprocess.run(
+        ["gh", "api", endpoint, "--include", *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout.replace("\r\n", "\n")
+    headers: dict[str, str] = {}
+    status = ""
+    body = output
+    if output.startswith("HTTP/"):
+        header_block, _, body = output.partition("\n\n")
+        status_line, *header_lines = header_block.splitlines()
+        status = status_line.split()[1]
+        for line in header_lines:
+            key, separator, value = line.partition(":")
+            if separator:
+                headers[key.lower()] = value.strip()
+
+    payload: dict | list = {}
+    if body.strip():
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            if result.returncode == 0:
+                raise
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    if result.returncode != 0 or errors or status in {"403", "429"}:
+        api_error = json.dumps(errors) if errors else (
+            payload.get("message", "") if isinstance(payload, dict) else ""
+        )
+        message = (
+            result.stderr.strip() or api_error or body.strip()
+            or f"GitHub API request failed: {endpoint}"
+        )
+        error_text = f"{message}\n{api_error}".lower()
+        if (
+            status == "429"
+            or headers.get("x-ratelimit-remaining") == "0"
+            or any(marker in error_text for marker in (
+                "rate limit", "rate_limit", "abuse detection",
+            ))
+        ):
+            raise RateLimitError(message, _rate_limit_retry_at(headers))
+        raise RuntimeError(message)
+    return payload
+
+
 def check_auth() -> Optional[str]:
     """Return None if `gh` is installed and authenticated, else an error string."""
     try:
@@ -89,23 +165,11 @@ def fetch_team_repos(org: str, team_slug: str) -> list[str]:
     page = 1
 
     while True:
-        result = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"orgs/{org}/teams/{team_slug}/repos?per_page=100&page={page}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
+        repos = _api_json(
+            f"orgs/{org}/teams/{team_slug}/repos?per_page=100&page={page}"
         )
-        if result.returncode != 0:
-            raise RuntimeError(
-                result.stderr.strip()
-                or f"Failed to fetch repos for team '{team_slug}' in org '{org}'"
-            )
-
-        repos: list[dict] = json.loads(result.stdout)
+        if not isinstance(repos, list):
+            raise RuntimeError(f"Unexpected repository list for team '{team_slug}'")
         all_repos.extend(r["full_name"] for r in repos)
 
         if len(repos) < 100:
@@ -118,44 +182,42 @@ def fetch_team_repos(org: str, team_slug: str) -> list[str]:
 def fetch_prs_for_repo(repo: str) -> list[dict]:
     """Return open PRs for a single repository with rich metadata."""
     owner, name = repo.split("/", 1)
-    result = subprocess.run(
-        [
-            "gh",
-            "api",
-            "graphql",
-            "--paginate",
-            "--slurp",
-            "-f",
-            f"owner={owner}",
-            "-f",
-            f"name={name}",
-            "-f",
-            f"query={_OPEN_PRS_QUERY}",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip().lower()
-        disabled_markers = [
-            "pull requests are disabled",
-            "issues and pull requests are disabled",
-            "this repository has disabled issues",
-        ]
-        if any(m in stderr for m in disabled_markers):
-            return []
-        raise RuntimeError(f"{repo}: {result.stderr.strip()}")
-
-    pages: list[dict] = json.loads(result.stdout)
     prs: list[dict] = []
-    for page in pages:
-        nodes = page["data"]["repository"]["pullRequests"]["nodes"]
-        for pr in nodes:
+    cursor: Optional[str] = None
+    while True:
+        args = [
+            "-f", f"owner={owner}",
+            "-f", f"name={name}",
+            "-f", f"query={_OPEN_PRS_QUERY}",
+        ]
+        if cursor is not None:
+            args.extend(["-f", f"endCursor={cursor}"])
+        try:
+            page = _api_json("graphql", *args)
+        except RateLimitError:
+            raise
+        except RuntimeError as exc:
+            disabled_markers = [
+                "pull requests are disabled",
+                "issues and pull requests are disabled",
+                "this repository has disabled issues",
+            ]
+            if any(marker in str(exc).lower() for marker in disabled_markers):
+                return []
+            raise RuntimeError(f"{repo}: {exc}") from exc
+
+        if not isinstance(page, dict):
+            raise RuntimeError(f"{repo}: Unexpected GraphQL response")
+        connection = page["data"]["repository"]["pullRequests"]
+        for pr in connection["nodes"]:
             pr["labels"] = pr["labels"]["nodes"]
             pr["repository"] = repo
             prs.append(pr)
+        if not connection["pageInfo"]["hasNextPage"]:
+            break
+        cursor = connection["pageInfo"]["endCursor"]
+        if not cursor:
+            raise RuntimeError(f"{repo}: Missing GraphQL pagination cursor")
     return prs
 
 
@@ -181,6 +243,7 @@ def fetch_all_team_prs(
     Fetch all open PRs across every repo the team has access to.
     Uses up to 5 concurrent GitHub API calls.
     Per-repo errors reuse cached PRs and are added to `failed_repos` when provided.
+    Rate limits stop scheduling new requests and are surfaced to the caller.
     Repos matching `ignore_repos` are skipped entirely.
     """
     repos = [
@@ -194,17 +257,31 @@ def fetch_all_team_prs(
             cached_by_repo.setdefault(repo, []).append(pr)
 
     all_prs: list[dict] = []
+    remaining_repos = iter(repos)
     with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_FETCHES) as executor:
-        futures = {executor.submit(fetch_prs_for_repo, r): r for r in repos}
-        for future in as_completed(futures):
-            repo = futures[future]
-            try:
-                all_prs.extend(future.result())
-            except Exception:
-                # Individual repo failures are non-fatal
-                all_prs.extend(cached_by_repo.get(repo, []))
-                if failed_repos is not None:
-                    failed_repos.append(repo)
+        futures = {
+            executor.submit(fetch_prs_for_repo, r): r
+            for r in islice(remaining_repos, _MAX_CONCURRENT_FETCHES)
+        }
+        while futures:
+            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in completed:
+                repo = futures.pop(future)
+                try:
+                    all_prs.extend(future.result())
+                except RateLimitError:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
+                except Exception:
+                    # Individual repo failures are non-fatal
+                    all_prs.extend(cached_by_repo.get(repo, []))
+                    if failed_repos is not None:
+                        failed_repos.append(repo)
+            for repo in islice(
+                remaining_repos, _MAX_CONCURRENT_FETCHES - len(futures)
+            ):
+                futures[executor.submit(fetch_prs_for_repo, repo)] = repo
 
     # Newest first
     all_prs.sort(key=lambda pr: pr.get("createdAt", ""), reverse=True)
