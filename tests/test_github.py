@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Event
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -367,6 +368,63 @@ class TestFetchAllTeamPrs:
                 github.fetch_all_team_prs("Equinor", "my-team")
         assert exc.value.retry_at == datetime(2030, 1, 1, tzinfo=timezone.utc)
         fetch.assert_not_called()
+
+    @pytest.mark.parametrize("first_delay,later_delay,expected", [
+        (60, 120, "later"),
+        (120, 60, "first"),
+        (None, 120, "later"),
+        (60, None, "first"),
+        (None, None, "first"),
+        (60, 60, "first"),
+    ])
+    def test_collects_latest_retry_deadline_from_in_flight_requests(
+        self, first_delay: int | None, later_delay: int | None, expected: str,
+    ) -> None:
+        start = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        errors = {
+            name: github.RateLimitError(
+                f"{name} limit",
+                start + timedelta(seconds=delay) if delay is not None else None,
+            )
+            for name, delay in (("first", first_delay), ("later", later_delay))
+        }
+        started = Barrier(2)
+        release_later = Event()
+        first_observed = Event()
+        real_wait = github.wait
+
+        def fetch(repo: str) -> list[dict]:
+            started.wait(timeout=5)
+            name = repo.split("/")[1]
+            if name == "later" and not release_later.wait(timeout=5):
+                raise AssertionError("Later request was not drained")
+            raise errors[name]
+
+        def wait_for_completed(
+            futures: dict, *, return_when: str,
+        ) -> tuple[set, set]:
+            if first_observed.is_set():
+                release_later.set()
+            result = real_wait(futures, return_when=return_when)
+            first_observed.set()
+            return result
+
+        with (
+            patch(
+                "pr_watcher.github.fetch_team_repos",
+                return_value=["acme/first", "acme/later", "acme/not-scheduled"],
+            ),
+            patch("pr_watcher.github._MAX_CONCURRENT_FETCHES", 2),
+            patch("pr_watcher.github.wait", side_effect=wait_for_completed),
+            patch("pr_watcher.github.fetch_prs_for_repo", side_effect=fetch) as request,
+        ):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_all_team_prs("acme", "platform")
+
+        assert exc.value is errors[expected]
+        assert sorted(call.args[0] for call in request.call_args_list) == [
+            "acme/first", "acme/later",
+        ]
 
 
 class TestRateLimits:

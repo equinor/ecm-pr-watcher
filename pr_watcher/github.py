@@ -243,7 +243,8 @@ def fetch_all_team_prs(
     Fetch all open PRs across every repo the team has access to.
     Uses up to 5 concurrent GitHub API calls.
     Per-repo errors reuse cached PRs and are added to `failed_repos` when provided.
-    Rate limits stop scheduling new requests and are surfaced to the caller.
+    Rate limits stop scheduling new requests; in-flight responses are drained
+    and the error with the latest retry deadline is surfaced to the caller.
     Repos matching `ignore_repos` are skipped entirely.
     """
     repos = [
@@ -257,6 +258,7 @@ def fetch_all_team_prs(
             cached_by_repo.setdefault(repo, []).append(pr)
 
     all_prs: list[dict] = []
+    rate_limit_error: Optional[RateLimitError] = None
     remaining_repos = iter(repos)
     with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_FETCHES) as executor:
         futures = {
@@ -267,21 +269,35 @@ def fetch_all_team_prs(
             completed, _ = wait(futures, return_when=FIRST_COMPLETED)
             for future in completed:
                 repo = futures.pop(future)
+                if future.cancelled():
+                    continue
                 try:
                     all_prs.extend(future.result())
-                except RateLimitError:
+                except RateLimitError as exc:
+                    if rate_limit_error is None or (
+                        exc.retry_at is not None
+                        and (
+                            rate_limit_error.retry_at is None
+                            or exc.retry_at > rate_limit_error.retry_at
+                        )
+                    ):
+                        rate_limit_error = exc
                     for pending in futures:
                         pending.cancel()
-                    raise
                 except Exception:
                     # Individual repo failures are non-fatal
                     all_prs.extend(cached_by_repo.get(repo, []))
                     if failed_repos is not None:
                         failed_repos.append(repo)
+            if rate_limit_error is not None:
+                continue
             for repo in islice(
                 remaining_repos, _MAX_CONCURRENT_FETCHES - len(futures)
             ):
                 futures[executor.submit(fetch_prs_for_repo, repo)] = repo
+
+    if rate_limit_error is not None:
+        raise rate_limit_error
 
     # Newest first
     all_prs.sort(key=lambda pr: pr.get("createdAt", ""), reverse=True)

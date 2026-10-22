@@ -559,7 +559,7 @@ class PRWatcherApp(App):
     def _start_fetch(self) -> None:
         if self._loading:
             return
-        if self._rate_limit_until and datetime.now() < self._rate_limit_until:
+        if self._rate_limit_until and datetime.now(timezone.utc) < self._rate_limit_until:
             self._update_status_bar()
             return
         self._rate_limit_until = None
@@ -655,7 +655,7 @@ class PRWatcherApp(App):
             self._failed_repo_count = failed_repo_count
             self._loading = False
             self._last_updated = datetime.now()
-            self._next_refresh = datetime.now() + timedelta(
+            self._next_refresh = datetime.now(timezone.utc) + timedelta(
                 seconds=self.config.refresh_interval
             )
             self._rebuild_table()
@@ -668,9 +668,9 @@ class PRWatcherApp(App):
             if isinstance(event.worker.error, github.RateLimitError):
                 self._rate_limit_attempts += 1
                 retry_at = event.worker.error.retry_at
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 if retry_at is not None:
-                    retry_at = retry_at.astimezone().replace(tzinfo=None)
+                    retry_at = retry_at.astimezone(timezone.utc)
                 if retry_at is None or retry_at <= now:
                     delay = min(3600, 60 * 2 ** min(self._rate_limit_attempts - 1, 6))
                     retry_at = now + timedelta(seconds=delay)
@@ -686,7 +686,7 @@ class PRWatcherApp(App):
                     self._set_view("error")
                 self._update_status_bar()
                 return
-            self._next_refresh = datetime.now() + timedelta(
+            self._next_refresh = datetime.now(timezone.utc) + timedelta(
                 seconds=self.config.refresh_interval
             )
 
@@ -840,10 +840,12 @@ class PRWatcherApp(App):
         parts: list[str] = []
 
         if self._rate_limit_until:
-            secs = max(0, int((self._rate_limit_until - datetime.now()).total_seconds()))
+            secs = max(
+                0, int((self._rate_limit_until - datetime.now(timezone.utc)).total_seconds())
+            )
             parts.append(
                 f"Rate limited - refresh paused until "
-                f"{self._rate_limit_until:%H:%M:%S} ({secs}s)"
+                f"{self._rate_limit_until.astimezone():%H:%M:%S} ({secs}s)"
             )
 
         if self._show_ignored:
@@ -867,7 +869,9 @@ class PRWatcherApp(App):
             parts.append(f"Updated {self._last_updated.strftime('%H:%M:%S')}")
 
         if not self._loading and self._next_refresh and not self._rate_limit_until:
-            secs = max(0, int((self._next_refresh - datetime.now()).total_seconds()))
+            secs = max(
+                0, int((self._next_refresh - datetime.now(timezone.utc)).total_seconds())
+            )
             parts.append(f"Refresh in {secs}s")
 
         if self._rate_limit_until:
@@ -897,7 +901,7 @@ class PRWatcherApp(App):
         if (
             not self._loading
             and self._next_refresh is not None
-            and datetime.now() >= self._next_refresh
+            and datetime.now(timezone.utc) >= self._next_refresh
         ):
             self._next_refresh = None
             self._start_fetch()

@@ -126,8 +126,8 @@ for the later time. Without usable timing information, it waits at least one
 minute, doubling that delay on consecutive rate-limited refreshes up to one hour.
 A successful refresh resets that backoff. Rate limits during team-repository
 discovery are handled the same way as those during PR fetching. Requests already
-in flight may finish, but no further repositories are scheduled after a rate
-limit is detected.
+in flight may finish, and the latest retry deadline from their responses is
+honored. No further repositories are scheduled after a rate limit is detected.
 
 GitHub has a [REST endpoint for listing PRs](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests)
 with a separate primary quota, but it does not supply all the dashboard's review

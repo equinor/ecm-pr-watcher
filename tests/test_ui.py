@@ -210,7 +210,7 @@ async def test_tick_during_shutdown_does_not_update_or_refresh():
         try:
             await app.query_one("#status-bar", Static).remove()
             assert not app.is_running
-            app._next_refresh = datetime.now() - timedelta(seconds=1)
+            app._next_refresh = datetime.now(timezone.utc) - timedelta(seconds=1)
             app._tick()
         finally:
             await close_all()
@@ -393,7 +393,7 @@ async def test_refresh_clears_visible_tooltip_with_stationary_pointer(change):
             assert tooltip.display
             assert table.tooltip.plain == initial_prs[0]["title"]
 
-            app._next_refresh = datetime.now() - timedelta(seconds=1)
+            app._next_refresh = datetime.now(timezone.utc) - timedelta(seconds=1)
             app._tick()
             await pilot.pause(0.5)
 
@@ -622,14 +622,14 @@ async def test_rate_limit_pauses_refresh_and_resumes_with_cached_rows(
 
             assert not app._loading
             assert app._rate_limit_until == (
-                retry_at.astimezone().replace(tzinfo=None) + timedelta(seconds=1)
+                retry_at + timedelta(seconds=1)
             )
             assert app._next_refresh == app._rate_limit_until
             assert app._last_updated == last_updated
             assert _row_keys(app) == expected_rows
             assert app.query_one("#pr-table").display == bool(initial_prs)
             assert "Rate limited - refresh paused until" in _status_text(app)
-            assert app._rate_limit_until.strftime("%H:%M:%S") in _status_text(app)
+            assert app._rate_limit_until.astimezone().strftime("%H:%M:%S") in _status_text(app)
             assert "Refresh in" not in _status_text(app)
             if initial_prs:
                 assert "stale data" in _status_text(app)
@@ -648,7 +648,7 @@ async def test_rate_limit_pauses_refresh_and_resumes_with_cached_rows(
             assert fetch.call_count == 2
             assert app._next_refresh == app._rate_limit_until
 
-            app._rate_limit_until = datetime.now() - timedelta(seconds=1)
+            app._rate_limit_until = datetime.now(timezone.utc) - timedelta(seconds=1)
             app._next_refresh = app._rate_limit_until
             app._tick()
             await pilot.pause(0.5)
@@ -674,35 +674,92 @@ async def test_rate_limit_on_startup_backoff_increases_until_success(
         side_effect=[error, error, deepcopy(MOCK_PRS), error],
     ) as fetch:
         async with app.run_test(size=(220, 40)) as pilot:
-            before = datetime.now()
+            before = datetime.now(timezone.utc)
             await pilot.pause(0.5)
             assert app.query_one("#error-panel").display
             assert "Rate limited" in _status_text(app)
             assert app._rate_limit_until >= before + timedelta(seconds=60)
-            assert app._rate_limit_until <= datetime.now() + timedelta(seconds=61)
+            assert app._rate_limit_until <= datetime.now(timezone.utc) + timedelta(seconds=61)
             assert app._last_updated is None
 
-            app._rate_limit_until = datetime.now() - timedelta(seconds=1)
+            app._rate_limit_until = datetime.now(timezone.utc) - timedelta(seconds=1)
             app._next_refresh = app._rate_limit_until
-            before = datetime.now()
+            before = datetime.now(timezone.utc)
             app._tick()
             await pilot.pause(0.5)
             assert fetch.call_count == 2
             assert app._rate_limit_until >= before + timedelta(seconds=120)
             assert app._rate_limit_attempts == 2
 
-            app._rate_limit_until = datetime.now() - timedelta(seconds=1)
+            app._rate_limit_until = datetime.now(timezone.utc) - timedelta(seconds=1)
             app.action_refresh()
             await pilot.pause(0.5)
             assert fetch.call_count == 3
             assert app._rate_limit_attempts == 0
 
-            before = datetime.now()
+            before = datetime.now(timezone.utc)
             app.action_refresh()
             await pilot.pause(0.5)
             assert app._rate_limit_until >= before + timedelta(seconds=60)
-            assert app._rate_limit_until <= datetime.now() + timedelta(seconds=61)
+            assert app._rate_limit_until <= datetime.now(timezone.utc) + timedelta(seconds=61)
             assert app._rate_limit_attempts == 1
+
+
+async def test_rate_limit_deadline_survives_daylight_saving_rollback() -> None:
+    summer = timezone(timedelta(hours=2))
+    winter = timezone(timedelta(hours=1))
+    current_local = datetime(2026, 10, 25, 2, 50, tzinfo=summer)
+    retry_at = datetime(2026, 10, 25, 2, 10, tzinfo=winter)
+    expected_deadline = retry_at.astimezone(timezone.utc) + timedelta(seconds=1)
+
+    def now(tz: timezone | None = None) -> datetime:
+        return (
+            current_local.replace(tzinfo=None)
+            if tz is None else current_local.astimezone(tz)
+        )
+
+    app = PRWatcherApp(Config(org="Equinor"))
+    with (
+        patch("pr_watcher.app.datetime", wraps=datetime) as clock,
+        patch(
+            "pr_watcher.github.fetch_all_team_prs",
+            side_effect=[
+                deepcopy(MOCK_PRS),
+                RateLimitError("API rate limit exceeded", retry_at),
+                deepcopy(MOCK_PRS),
+            ],
+        ) as fetch,
+    ):
+        clock.now.side_effect = now
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            assert app._next_refresh.tzinfo is timezone.utc
+            app.action_refresh()
+            await pilot.pause(0.5)
+            assert app._rate_limit_until == expected_deadline
+            assert app._rate_limit_until.tzinfo is timezone.utc
+            assert app._next_refresh == expected_deadline
+            assert "(1201s)" in _status_text(app)
+
+            current_local = datetime(2026, 10, 25, 2, 0, tzinfo=winter)
+            app._tick()
+            app.action_refresh()
+            assert "(601s)" in _status_text(app)
+            assert fetch.call_count == 2
+
+            current_local = datetime(2026, 10, 25, 2, 10, tzinfo=winter)
+            app._tick()
+            app.action_refresh()
+            assert fetch.call_count == 2
+            current_local += timedelta(seconds=1)
+            app._tick()
+            await pilot.pause(0.5)
+            assert fetch.call_count == 3
+            assert app._rate_limit_until is None
+            assert app._next_refresh == (
+                current_local.astimezone(timezone.utc)
+                + timedelta(seconds=app.config.refresh_interval)
+            )
 
 
 async def test_duplicate_pr_numbers_use_repository_identity():
