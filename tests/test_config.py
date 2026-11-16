@@ -142,14 +142,14 @@ class TestParseArgs:
     @pytest.mark.parametrize(
         ("local_settings", "expected"),
         [
-            ({}, ["iso-datamodell", "a", "Equinor/b"]),
+            ({}, ["iso-wo-performance", "a", "Equinor/b"]),
             ({"ignore_repos": ["x"]}, ["x", "a", "Equinor/b"]),
             ({"ignore_repos": []}, ["a", "Equinor/b"]),
         ],
     )
     def test_cli_ignore_repo_adds_to_effective_list(self, monkeypatch, local_settings, expected):
         monkeypatch.setattr(
-            config_module, "load_defaults", lambda: {"ignore_repos": ["iso-datamodell"]}
+            config_module, "load_defaults", lambda: {"ignore_repos": ["iso-wo-performance"]}
         )
         monkeypatch.setattr(
             config_module, "load_settings", lambda: {"org": "Equinor", **local_settings}

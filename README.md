@@ -166,7 +166,7 @@ python main.py
 | `bell` | `true` | Ring terminal bell when new PRs appear; use `false` for `--no-bell` |
 | `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"updated"` shows the most recently changed PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
 | `ignore_days` | `14` | How many days a PR stays hidden after you press `i` on it. Must be a whole number from 1 to 3650. |
-| `ignore_repos` | `[]` (shared defaults: `["iso-datamodell"]`) | Repositories to skip entirely, given as `name` or `owner/name` (case-insensitive). Setting this in `pr-watcher.json` replaces the shared default list; use `[]` to watch all repositories. `--ignore-repo` adds to this list. |
+| `ignore_repos` | `[]` (shared defaults: `["iso-wo-performance"]`) | Repositories to skip entirely, given as `name` or `owner/name` (case-insensitive). Setting this in `pr-watcher.json` replaces the shared default list; use `[]` to watch all repositories. `--ignore-repo` adds to this list. |
 
 The app refuses to start if `pr-watcher.defaults.json` or `pr-watcher.json` contains invalid JSON, unknown settings, or wrong value types.
 
