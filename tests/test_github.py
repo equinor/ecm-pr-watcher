@@ -247,13 +247,13 @@ class TestFetchAllTeamPrs:
         assert result[1]["number"] == 1
 
     def test_ignored_repos_are_not_fetched(self):
-        repos = ["Equinor/keep", "Equinor/ISO-Datamodell", "Other/skip-full", "Equinor/skip-full"]
+        repos = ["Equinor/keep", "Equinor/ISO-WO-Performance", "Other/skip-full", "Equinor/skip-full"]
         with (
             patch("pr_watcher.github.fetch_team_repos", return_value=repos),
             patch("pr_watcher.github.fetch_prs_for_repo", return_value=[]) as fetch,
         ):
             github.fetch_all_team_prs(
-                "Equinor", "my-team", ignore_repos=["iso-datamodell", "other/skip-full"]
+                "Equinor", "my-team", ignore_repos=["iso-wo-performance", "other/skip-full"]
             )
         fetched = sorted(call.args[0] for call in fetch.call_args_list)
         assert fetched == ["Equinor/keep", "Equinor/skip-full"]
