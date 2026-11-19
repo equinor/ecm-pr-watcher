@@ -115,7 +115,26 @@ Review states use equal-width emoji so their labels align: ✅ Approved,
 
 ## Rate limits
 
-When GitHub rate-limits a refresh, the app keeps the previous PR rows visible
+When GitHub exhausts the GraphQL primary quota, the app switches unfinished
+repositories to a lightweight REST fallback and keeps refreshing through REST
+until the GraphQL reset time. It then automatically tries GraphQL again. The
+status bar shows **REST fallback (limited metadata)**.
+
+REST still updates PR titles, authors, labels, timestamps, draft state, links,
+and requested reviewers/teams. Review status shows **Unknown** (except drafts),
+checks have no indicator, and comment counts show **?**. Reviewer lists are marked
+**(partial)** because submitted reviewers are unavailable; without requested
+reviewers they show **Unknown**. No extra per-PR requests are made. Existing
+comment-count baselines are retained so returning to GraphQL does not fabricate
+unread-comment notifications. With priority sorting, unknown review statuses
+appear after approved PRs and before drafts.
+
+Fallback requires an explicit GraphQL resource header, exhausted quota, and a
+valid future reset time, with no secondary-limit signal. Secondary or ambiguous
+limits, REST limits, and rate limits during team-repository discovery still pause
+refreshes rather than switching APIs.
+
+When a rate limit pauses a refresh, the app keeps the previous PR rows visible
 and pauses both automatic refreshes and the `r` shortcut. The status bar shows
 **Rate limited - refresh paused until HH:MM:SS**, using local time, with a
 countdown. Refresh resumes automatically after the cooldown.
@@ -125,15 +144,13 @@ exhausted and honors `Retry-After` for secondary limits. If both apply, it waits
 for the later time. Without usable timing information, it waits at least one
 minute, doubling that delay on consecutive rate-limited refreshes up to one hour.
 A successful refresh resets that backoff. Rate limits during team-repository
-discovery are handled the same way as those during PR fetching. Requests already
-in flight may finish, and the latest retry deadline from their responses is
-honored. No further repositories are scheduled after a rate limit is detected.
+discovery also pause refreshes. In-flight requests are drained before switching
+APIs or surfacing a cooldown. No further requests are scheduled for the limited
+API; multiple cooldown errors use the latest retry deadline.
 
-GitHub has a [REST endpoint for listing PRs](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests)
-with a separate primary quota, but it does not supply all the dashboard's review
-and check metadata in one response. Reproducing that data would require additional
-requests per PR. The app retains GraphQL to preserve those fields; switching to
-REST would not avoid secondary limits shared by both APIs. See
+GitHub's [REST endpoint for listing PRs](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests)
+has a separate primary quota, but switching APIs does not avoid secondary limits
+shared by both APIs. GraphQL remains the normal path for complete metadata. See
 [GitHub's rate-limit guidance](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
 
 ## Last change
@@ -164,7 +181,7 @@ python main.py
 | `team_slug` | *(derived from `team`)* | GitHub team slug; omitted or empty values are auto-derived |
 | `interval` | `60` | Auto-refresh interval in seconds (integer), corresponding to `--interval` |
 | `bell` | `true` | Ring terminal bell when new PRs appear; use `false` for `--no-bell` |
-| `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"updated"` shows the most recently changed PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
+| `sort` | `"created"` | Row order. `"created"` shows the newest PRs first. `"updated"` shows the most recently changed PRs first. `"priority"` groups PRs as: Review Needed or No Reviews with no reviewers assigned, Review Needed or No Reviews with reviewers, Changes Requested, Approved, Unknown (REST fallback), then drafts. Copilot does not count as a reviewer. Within each group, the oldest PR comes first. |
 | `ignore_days` | `14` | How many days a PR stays hidden after you press `i` on it. Must be a whole number from 1 to 3650. |
 | `ignore_repos` | `[]` (shared defaults: `["iso-wo-performance"]`) | Repositories to skip entirely, given as `name` or `owner/name` (case-insensitive). Setting this in `pr-watcher.json` replaces the shared default list; use `[]` to watch all repositories. `--ignore-repo` adds to this list. |
 
@@ -175,7 +192,7 @@ Ignored PRs are saved in `pr-watcher-state.json` in the repository root. The app
 **How the app works:**
 
 1. Uses `gh api` to list all repositories the target team has access to, skipping any repositories matched by `ignore_repos`.
-2. For each repository, runs GraphQL PR queries concurrently (up to 5 parallel calls) to fetch open PRs.
+2. For each repository, runs GraphQL PR queries concurrently (up to 5 parallel calls) to fetch open PRs, falling back to lightweight REST after confirmed GraphQL primary-quota exhaustion.
 3. Refreshes automatically at the configured interval.
 4. Retains previous rows for repositories whose refresh fails and marks them as stale.
 5. Rings the terminal bell when PRs appear that weren't present in the previous fetch.

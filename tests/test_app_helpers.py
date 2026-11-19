@@ -152,7 +152,15 @@ class TestPrPriority:
 
     @pytest.mark.parametrize("decision", ["APPROVED", "REVIEW_REQUIRED", "CHANGES_REQUESTED", None])
     def test_draft_is_last_regardless_of_decision(self, decision):
-        assert pr_priority(_pr(1, decision, draft=True)) == 4
+        assert pr_priority(_pr(1, decision, draft=True)) == 5
+
+    def test_unknown_reviews_sort_between_approved_and_drafts(self) -> None:
+        prs = [
+            {**_pr(1), "_rest_fallback": True},
+            _pr(2, "APPROVED"),
+            {**_pr(3, draft=True), "_rest_fallback": True},
+        ]
+        assert [pr["number"] for pr in order_prs(prs, "priority")] == [2, 1, 3]
 
 
 class TestOrderPrs:
@@ -243,12 +251,17 @@ class TestFormatReviewStatus:
     def test_draft_takes_priority_over_decision(self):
         assert format_review_status({"isDraft": True, "reviewDecision": "APPROVED"}) == "📝 Draft"
 
+    def test_rest_fallback_does_not_claim_there_are_no_reviews(self) -> None:
+        assert format_review_status({"_rest_fallback": True}) == "❔ Unknown"
+        assert format_review_status({"_rest_fallback": True, "isDraft": True}) == "📝 Draft"
+
     @pytest.mark.parametrize("pr", [
         {"reviewDecision": "APPROVED"},
         {"reviewDecision": "CHANGES_REQUESTED"},
         {"reviewDecision": "REVIEW_REQUIRED"},
         {},
         {"isDraft": True},
+        {"_rest_fallback": True},
     ])
     def test_icons_use_two_terminal_cells(self, pr):
         icon, _ = format_review_status(pr).split(" ", 1)
@@ -325,6 +338,17 @@ class TestFormatLabels:
 
 
 class TestFormatReviewers:
+    def test_rest_reviewers_are_explicitly_incomplete(self) -> None:
+        pr = {
+            "_rest_fallback": True,
+            "reviewRequests": {"nodes": [
+                {"requestedReviewer": {"login": "alice"}},
+                {"requestedReviewer": {"slug": "team"}},
+            ]},
+        }
+        assert format_reviewers(pr) == "alice, team:team (partial)"
+        assert format_reviewers({"_rest_fallback": True}) == "Unknown"
+
     def test_no_reviewers(self):
         assert format_reviewers({}) == "—"
         assert format_reviewers({
