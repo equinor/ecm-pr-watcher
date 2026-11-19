@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from itertools import islice
 from typing import Optional
@@ -64,9 +65,23 @@ query($owner: String!, $name: String!, $endCursor: String) {
 
 
 class RateLimitError(RuntimeError):
-    def __init__(self, message: str, retry_at: Optional[datetime] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        retry_at: Optional[datetime] = None,
+        *,
+        resource: Optional[str] = None,
+        is_primary: bool = False,
+    ) -> None:
         super().__init__(message)
         self.retry_at = retry_at
+        self.resource = resource
+        self.is_primary = is_primary
+
+
+@dataclass
+class FetchState:
+    graphql_retry_at: Optional[datetime] = None
 
 
 def _rate_limit_retry_at(headers: dict[str, str]) -> Optional[datetime]:
@@ -133,7 +148,20 @@ def _api_json(endpoint: str, *args: str) -> dict | list:
                 "rate limit", "rate_limit", "abuse detection",
             ))
         ):
-            raise RateLimitError(message, _rate_limit_retry_at(headers))
+            retry_at = _rate_limit_retry_at(headers)
+            resource = headers.get("x-ratelimit-resource")
+            is_primary = (
+                resource in {"graphql", "core"}
+                and headers.get("x-ratelimit-remaining") == "0"
+                and retry_at is not None
+                and retry_at > datetime.now(timezone.utc)
+                and "retry-after" not in headers
+                and status != "429"
+                and not any(marker in error_text for marker in ("secondary", "abuse"))
+            )
+            raise RateLimitError(
+                message, retry_at, resource=resource, is_primary=is_primary,
+            )
         raise RuntimeError(message)
     return payload
 
@@ -221,6 +249,52 @@ def fetch_prs_for_repo(repo: str) -> list[dict]:
     return prs
 
 
+def fetch_prs_for_repo_rest(repo: str) -> list[dict]:
+    """Return open PRs without per-PR requests for review/check/comment details."""
+    prs: list[dict] = []
+    seen_numbers: set[int] = set()
+    page = 1
+    while True:
+        items = _api_json(
+            f"repos/{repo}/pulls?state=open&sort=created&direction=desc"
+            f"&per_page=100&page={page}"
+        )
+        if not isinstance(items, list):
+            raise RuntimeError(f"{repo}: Unexpected REST pull request response")
+        for pr in items:
+            if pr["number"] in seen_numbers:
+                continue
+            seen_numbers.add(pr["number"])
+            requests = [
+                {"requestedReviewer": {"login": reviewer["login"]}}
+                for reviewer in pr.get("requested_reviewers") or []
+            ]
+            requests.extend(
+                {"requestedReviewer": {"slug": team["slug"]}}
+                for team in pr.get("requested_teams") or []
+            )
+            prs.append({
+                "number": pr["number"],
+                "title": pr["title"],
+                "author": pr.get("user") or {},
+                "labels": pr.get("labels") or [],
+                "reviewRequests": {"nodes": requests},
+                "reviewDecision": None,
+                "totalCommentsCount": None,
+                "createdAt": pr["created_at"],
+                "updatedAt": pr["updated_at"],
+                "url": pr["html_url"],
+                "isDraft": pr.get("draft", False),
+                "headRefName": pr["head"]["ref"],
+                "repository": repo,
+                "_rest_fallback": True,
+            })
+        if len(items) < 100:
+            break
+        page += 1
+    return prs
+
+
 def is_repo_ignored(repo: str, ignore_repos: list[str]) -> bool:
     """Match `owner/name` against entries given as `name` or `owner/name`, case-insensitively."""
     full = repo.lower()
@@ -238,13 +312,15 @@ def fetch_all_team_prs(
     cached_prs: Optional[list[dict]] = None,
     failed_repos: Optional[list[str]] = None,
     ignore_repos: Optional[list[str]] = None,
+    fetch_state: Optional[FetchState] = None,
 ) -> list[dict]:
     """
     Fetch all open PRs across every repo the team has access to.
     Uses up to 5 concurrent GitHub API calls.
     Per-repo errors reuse cached PRs and are added to `failed_repos` when provided.
-    Rate limits stop scheduling new requests; in-flight responses are drained
-    and the error with the latest retry deadline is surfaced to the caller.
+    Confirmed GraphQL primary limits switch unfinished repos to lightweight REST
+    until reset. Other rate limits stop scheduling and surface the latest retry
+    deadline after in-flight responses are drained.
     Repos matching `ignore_repos` are skipped entirely.
     """
     repos = [
@@ -257,47 +333,75 @@ def fetch_all_team_prs(
         if repo:
             cached_by_repo.setdefault(repo, []).append(pr)
 
+    state = fetch_state if fetch_state is not None else FetchState()
+    if (
+        state.graphql_retry_at is not None
+        and datetime.now(timezone.utc) >= state.graphql_retry_at
+    ):
+        state.graphql_retry_at = None
+    use_rest = state.graphql_retry_at is not None
     all_prs: list[dict] = []
-    rate_limit_error: Optional[RateLimitError] = None
     remaining_repos = iter(repos)
     with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_FETCHES) as executor:
-        futures = {
-            executor.submit(fetch_prs_for_repo, r): r
-            for r in islice(remaining_repos, _MAX_CONCURRENT_FETCHES)
-        }
-        while futures:
-            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
-            for future in completed:
-                repo = futures.pop(future)
-                if future.cancelled():
+        while True:
+            fetch = fetch_prs_for_repo_rest if use_rest else fetch_prs_for_repo
+            rate_limit_error: Optional[RateLimitError] = None
+            fallback_repos: list[str] = []
+            futures = {
+                executor.submit(fetch, r): r
+                for r in islice(remaining_repos, _MAX_CONCURRENT_FETCHES)
+            }
+            while futures:
+                completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    repo = futures.pop(future)
+                    if future.cancelled():
+                        fallback_repos.append(repo)
+                        continue
+                    try:
+                        all_prs.extend(future.result())
+                    except RateLimitError as exc:
+                        if (
+                            not use_rest
+                            and exc.is_primary
+                            and exc.resource == "graphql"
+                            and exc.retry_at is not None
+                        ):
+                            retry_at = exc.retry_at + timedelta(seconds=1)
+                            if (
+                                state.graphql_retry_at is None
+                                or retry_at > state.graphql_retry_at
+                            ):
+                                state.graphql_retry_at = retry_at
+                            fallback_repos.append(repo)
+                        elif rate_limit_error is None or (
+                            exc.retry_at is not None
+                            and (
+                                rate_limit_error.retry_at is None
+                                or exc.retry_at > rate_limit_error.retry_at
+                            )
+                        ):
+                            rate_limit_error = exc
+                        for pending in futures:
+                            pending.cancel()
+                    except Exception:
+                        # Individual repo failures are non-fatal
+                        all_prs.extend(cached_by_repo.get(repo, []))
+                        if failed_repos is not None:
+                            failed_repos.append(repo)
+                if rate_limit_error is not None or fallback_repos:
                     continue
-                try:
-                    all_prs.extend(future.result())
-                except RateLimitError as exc:
-                    if rate_limit_error is None or (
-                        exc.retry_at is not None
-                        and (
-                            rate_limit_error.retry_at is None
-                            or exc.retry_at > rate_limit_error.retry_at
-                        )
-                    ):
-                        rate_limit_error = exc
-                    for pending in futures:
-                        pending.cancel()
-                except Exception:
-                    # Individual repo failures are non-fatal
-                    all_prs.extend(cached_by_repo.get(repo, []))
-                    if failed_repos is not None:
-                        failed_repos.append(repo)
-            if rate_limit_error is not None:
-                continue
-            for repo in islice(
-                remaining_repos, _MAX_CONCURRENT_FETCHES - len(futures)
-            ):
-                futures[executor.submit(fetch_prs_for_repo, repo)] = repo
+                for repo in islice(
+                    remaining_repos, _MAX_CONCURRENT_FETCHES - len(futures)
+                ):
+                    futures[executor.submit(fetch, repo)] = repo
 
-    if rate_limit_error is not None:
-        raise rate_limit_error
+            if rate_limit_error is not None:
+                raise rate_limit_error
+            if not fallback_repos:
+                break
+            remaining_repos = iter([*fallback_repos, *remaining_repos])
+            use_rest = True
 
     # Newest first
     all_prs.sort(key=lambda pr: pr.get("createdAt", ""), reverse=True)

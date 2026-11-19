@@ -37,6 +37,32 @@ def _graphql_page(prs, has_next_page=False, end_cursor=None):
     }
 
 
+def _rest_pr(number: int = 1) -> dict:
+    return {
+        "number": number,
+        "title": f"PR {number}",
+        "user": {"login": "alice"},
+        "labels": [{"name": "bug"}],
+        "requested_reviewers": [{"login": "bob"}],
+        "requested_teams": [{"slug": "my-team"}],
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "html_url": f"https://github.com/acme/repo/pull/{number}",
+        "url": f"https://api.github.com/repos/acme/repo/pulls/{number}",
+        "draft": False,
+        "head": {"ref": "feature", "sha": "abc123"},
+    }
+
+
+def _primary_graphql_error() -> github.RateLimitError:
+    return github.RateLimitError(
+        "API rate limit exceeded",
+        datetime(2030, 1, 1, tzinfo=timezone.utc),
+        resource="graphql",
+        is_primary=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # check_auth
 # ---------------------------------------------------------------------------
@@ -200,6 +226,79 @@ class TestFetchPrsForRepo:
             with pytest.raises(RuntimeError, match="Resource not accessible") as exc:
                 github.fetch_prs_for_repo("Equinor/my-repo")
         assert not isinstance(exc.value, github.RateLimitError)
+
+
+# ---------------------------------------------------------------------------
+# fetch_prs_for_repo_rest
+# ---------------------------------------------------------------------------
+
+class TestFetchPrsForRepoRest:
+    @pytest.mark.parametrize("deleted_author", [False, True])
+    def test_normalizes_pr_without_inventing_metadata(self, deleted_author: bool) -> None:
+        pr = _rest_pr()
+        if deleted_author:
+            pr["user"] = None
+        with patch(
+            "pr_watcher.github._api_json", return_value=[pr],
+        ) as api:
+            result = github.fetch_prs_for_repo_rest("acme/repo")
+
+        assert result == [{
+            "number": 1,
+            "title": "PR 1",
+            "author": {} if deleted_author else {"login": "alice"},
+            "labels": [{"name": "bug"}],
+            "reviewRequests": {"nodes": [
+                {"requestedReviewer": {"login": "bob"}},
+                {"requestedReviewer": {"slug": "my-team"}},
+            ]},
+            "reviewDecision": None,
+            "totalCommentsCount": None,
+            "createdAt": pr["created_at"],
+            "updatedAt": pr["updated_at"],
+            "url": pr["html_url"],
+            "isDraft": False,
+            "headRefName": "feature",
+            "repository": "acme/repo",
+            "_rest_fallback": True,
+        }]
+        api.assert_called_once_with(
+            "repos/acme/repo/pulls?state=open&sort=created&direction=desc"
+            "&per_page=100&page=1"
+        )
+
+    def test_paginates_without_per_pr_requests(self) -> None:
+        with patch(
+            "pr_watcher.github._api_json",
+            side_effect=[
+                [_rest_pr(number) for number in range(1, 101)],
+                [_rest_pr(101)],
+            ],
+        ) as api:
+            result = github.fetch_prs_for_repo_rest("acme/repo")
+        assert [pr["number"] for pr in result] == list(range(1, 102))
+        assert api.call_count == 2
+        assert api.call_args.args[0].endswith("&page=2")
+
+    def test_deduplicates_overlapping_pages_preserving_order(self) -> None:
+        with patch(
+            "pr_watcher.github._api_json",
+            side_effect=[
+                [_rest_pr(number) for number in range(200, 100, -1)],
+                [_rest_pr(101), _rest_pr(100)],
+            ],
+        ) as api:
+            result = github.fetch_prs_for_repo_rest("acme/repo")
+        assert [pr["number"] for pr in result] == list(range(200, 99, -1))
+        assert api.call_count == 2
+
+    def test_invalid_page_does_not_return_partial_results(self) -> None:
+        with patch(
+            "pr_watcher.github._api_json",
+            side_effect=[[_rest_pr()] * 100, {"message": "unexpected"}],
+        ):
+            with pytest.raises(RuntimeError, match="Unexpected REST"):
+                github.fetch_prs_for_repo_rest("acme/repo")
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +527,42 @@ class TestFetchAllTeamPrs:
 
 
 class TestRateLimits:
+    @pytest.mark.parametrize(("changes", "message", "status", "primary"), [
+        ({}, "API rate limit exceeded", 200, True),
+        ({}, "API rate limit exceeded", 403, True),
+        ({"X-Ratelimit-Resource": "core"}, "API rate limit exceeded", 403, True),
+        ({"X-Ratelimit-Resource": ""}, "API rate limit exceeded", 200, False),
+        ({"X-Ratelimit-Remaining": "1"}, "API rate limit exceeded", 200, False),
+        ({"X-Ratelimit-Reset": "invalid"}, "API rate limit exceeded", 200, False),
+        ({"X-Ratelimit-Reset": "1"}, "API rate limit exceeded", 200, False),
+        ({"Retry-After": "120"}, "API rate limit exceeded", 200, False),
+        ({}, "You have exceeded a secondary rate limit", 200, False),
+        ({}, "API abuse detection rate limit", 403, False),
+        ({}, "Too many requests", 429, False),
+    ])
+    def test_identifies_only_explicit_primary_limits(
+        self, changes: dict, message: str, status: int, primary: bool,
+    ) -> None:
+        headers = {
+            "X-Ratelimit-Resource": "graphql",
+            "X-Ratelimit-Remaining": "0",
+            "X-Ratelimit-Reset": "1893456000",
+            **changes,
+        }
+        with patch(
+            "pr_watcher.github.subprocess.run",
+            return_value=_run_result(
+                stdout=json.dumps({"errors": [{"message": message}]}),
+                headers=headers,
+                status=status,
+                returncode=1,
+            ),
+        ):
+            with pytest.raises(github.RateLimitError) as exc:
+                github._api_json("graphql")
+        assert exc.value.resource == headers["X-Ratelimit-Resource"]
+        assert exc.value.is_primary is primary
+
     @pytest.mark.parametrize("returncode", [0, 1])
     def test_graphql_rate_limit_with_http_200(self, returncode: int) -> None:
         response = _run_result(
@@ -544,3 +679,212 @@ class TestRateLimits:
             with pytest.raises(github.RateLimitError):
                 github.fetch_prs_for_repo("Equinor/my-repo")
         assert run.call_count == 2
+
+
+class TestRestFallback:
+    def test_switches_once_and_recovers_after_graphql_reset(self) -> None:
+        state = github.FetchState()
+        primary_limit = _run_result(
+            stdout=json.dumps({
+                "errors": [{"type": "RATE_LIMITED", "message": "Quota exhausted"}],
+            }),
+            headers={
+                "X-Ratelimit-Resource": "graphql",
+                "X-Ratelimit-Remaining": "0",
+                "X-Ratelimit-Reset": "1893456000",
+            },
+        )
+        rest_response = _run_result(stdout=json.dumps([_rest_pr()]))
+        graphql_response = _run_result(stdout=json.dumps(_graphql_page([])))
+        with (
+            patch("pr_watcher.github.fetch_team_repos", return_value=["acme/a", "acme/b"]),
+            patch("pr_watcher.github._MAX_CONCURRENT_FETCHES", 1),
+            patch(
+                "pr_watcher.github.subprocess.run",
+                side_effect=[
+                    primary_limit, rest_response, rest_response,
+                    rest_response, rest_response,
+                    graphql_response, graphql_response,
+                ],
+            ) as run,
+        ):
+            first = github.fetch_all_team_prs("acme", "team", fetch_state=state)
+            assert {pr["repository"] for pr in first} == {"acme/a", "acme/b"}
+            assert all(pr["_rest_fallback"] for pr in first)
+            assert state.graphql_retry_at == datetime(
+                2030, 1, 1, 0, 0, 1, tzinfo=timezone.utc,
+            )
+            second = github.fetch_all_team_prs("acme", "team", fetch_state=state)
+            assert second == first
+            assert [call.args[0][2] for call in run.call_args_list[:5]] == [
+                "graphql",
+                "repos/acme/a/pulls?state=open&sort=created&direction=desc&per_page=100&page=1",
+                "repos/acme/b/pulls?state=open&sort=created&direction=desc&per_page=100&page=1",
+                "repos/acme/a/pulls?state=open&sort=created&direction=desc&per_page=100&page=1",
+                "repos/acme/b/pulls?state=open&sort=created&direction=desc&per_page=100&page=1",
+            ]
+
+            state.graphql_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            assert github.fetch_all_team_prs("acme", "team", fetch_state=state) == []
+            assert state.graphql_retry_at is None
+            assert [call.args[0][2] for call in run.call_args_list[5:]] == [
+                "graphql", "graphql",
+            ]
+
+    @pytest.mark.parametrize("error", [
+        github.RateLimitError("Ambiguous limit"),
+        github.RateLimitError(
+            "Secondary limit", datetime(2030, 1, 1, tzinfo=timezone.utc),
+            resource="graphql",
+        ),
+        github.RateLimitError(
+            "REST primary limit", datetime(2030, 1, 1, tzinfo=timezone.utc),
+            resource="core", is_primary=True,
+        ),
+    ])
+    def test_other_limits_never_switch_apis(self, error: github.RateLimitError) -> None:
+        state = github.FetchState()
+        with (
+            patch("pr_watcher.github.fetch_team_repos", return_value=["acme/repo"]),
+            patch("pr_watcher.github.fetch_prs_for_repo", side_effect=error),
+            patch("pr_watcher.github.fetch_prs_for_repo_rest") as rest,
+        ):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_all_team_prs("acme", "team", fetch_state=state)
+        assert exc.value is error
+        assert state.graphql_retry_at is None
+        rest.assert_not_called()
+
+    def test_rest_limit_stops_fallback_without_retrying_graphql(self) -> None:
+        state = github.FetchState()
+        error = github.RateLimitError("REST quota exhausted")
+        with (
+            patch("pr_watcher.github.fetch_team_repos", return_value=["acme/a", "acme/b"]),
+            patch("pr_watcher.github._MAX_CONCURRENT_FETCHES", 1),
+            patch(
+                "pr_watcher.github.fetch_prs_for_repo",
+                side_effect=_primary_graphql_error(),
+            ) as graphql,
+            patch("pr_watcher.github.fetch_prs_for_repo_rest", side_effect=error) as rest,
+        ):
+            with pytest.raises(github.RateLimitError) as exc:
+                github.fetch_all_team_prs("acme", "team", fetch_state=state)
+        assert exc.value is error
+        assert state.graphql_retry_at is not None
+        graphql.assert_called_once_with("acme/a")
+        rest.assert_called_once_with("acme/a")
+
+    def test_rest_repo_failures_keep_cache_and_success_replaces_it(self) -> None:
+        state = github.FetchState(_primary_graphql_error().retry_at)
+        cached = [
+            {"repository": "acme/a", "number": 1},
+            {"repository": "acme/b", "number": 2},
+        ]
+        current = {"repository": "acme/b", "number": 3}
+        failures: list[str] = []
+
+        def rest(repo: str) -> list[dict]:
+            if repo == "acme/a":
+                raise RuntimeError("Not accessible")
+            return [current]
+
+        with (
+            patch("pr_watcher.github.fetch_team_repos", return_value=["acme/a", "acme/b"]),
+            patch("pr_watcher.github.fetch_prs_for_repo") as graphql,
+            patch("pr_watcher.github.fetch_prs_for_repo_rest", side_effect=rest),
+        ):
+            result = github.fetch_all_team_prs(
+                "acme", "team", cached, failures, fetch_state=state,
+            )
+        assert {pr["number"] for pr in result} == {1, 3}
+        assert failures == ["acme/a"]
+        graphql.assert_not_called()
+
+    def test_later_graphql_page_limit_replaces_partial_repo_with_rest(self) -> None:
+        with (
+            patch("pr_watcher.github.fetch_team_repos", return_value=["acme/repo"]),
+            patch(
+                "pr_watcher.github._api_json",
+                side_effect=[
+                    _graphql_page(
+                        [{"number": 99, "labels": {"nodes": []}}],
+                        has_next_page=True, end_cursor="next",
+                    ),
+                    _primary_graphql_error(),
+                    [_rest_pr(1), _rest_pr(2)],
+                ],
+            ),
+        ):
+            result = github.fetch_all_team_prs("acme", "team")
+        assert [pr["number"] for pr in result] == [1, 2]
+        assert all(pr["_rest_fallback"] for pr in result)
+
+    @pytest.mark.parametrize("later_response", ["success", "primary", "secondary"])
+    def test_drains_graphql_before_rest_and_never_bypasses_secondary_limit(
+        self, later_response: str,
+    ) -> None:
+        state = github.FetchState()
+        first_error = _primary_graphql_error()
+        later_error = github.RateLimitError(
+            f"{later_response} limit",
+            first_error.retry_at + timedelta(seconds=120),
+            resource="graphql",
+            is_primary=later_response == "primary",
+        )
+        started = Barrier(2)
+        release_later = Event()
+        first_observed = Event()
+        real_wait = github.wait
+        current = {"repository": "acme/later", "number": 1}
+
+        def graphql(repo: str) -> list[dict]:
+            started.wait(timeout=5)
+            if repo == "acme/first":
+                raise first_error
+            if not release_later.wait(timeout=5):
+                raise AssertionError("In-flight GraphQL request was not drained")
+            if later_response == "success":
+                return [current]
+            raise later_error
+
+        def wait_for_completed(
+            futures: dict, *, return_when: str,
+        ) -> tuple[set, set]:
+            if first_observed.is_set():
+                release_later.set()
+            result = real_wait(futures, return_when=return_when)
+            first_observed.set()
+            return result
+
+        def rest(repo: str) -> list[dict]:
+            assert release_later.is_set()
+            return [{"repository": repo, "number": 2, "_rest_fallback": True}]
+
+        with (
+            patch(
+                "pr_watcher.github.fetch_team_repos",
+                return_value=["acme/first", "acme/later", "acme/not-scheduled"],
+            ),
+            patch("pr_watcher.github._MAX_CONCURRENT_FETCHES", 2),
+            patch("pr_watcher.github.wait", side_effect=wait_for_completed),
+            patch("pr_watcher.github.fetch_prs_for_repo", side_effect=graphql) as graph,
+            patch("pr_watcher.github.fetch_prs_for_repo_rest", side_effect=rest) as request,
+        ):
+            if later_response == "secondary":
+                with pytest.raises(github.RateLimitError) as exc:
+                    github.fetch_all_team_prs("acme", "team", fetch_state=state)
+                assert exc.value is later_error
+                request.assert_not_called()
+            else:
+                result = github.fetch_all_team_prs("acme", "team", fetch_state=state)
+                assert {pr["repository"] for pr in result} == {
+                    "acme/first", "acme/later", "acme/not-scheduled",
+                }
+                rest_repos = {call.args[0] for call in request.call_args_list}
+                if later_response == "success":
+                    assert current in result
+                    assert rest_repos == {"acme/first", "acme/not-scheduled"}
+                else:
+                    assert rest_repos == {"acme/first", "acme/later", "acme/not-scheduled"}
+                    assert state.graphql_retry_at == later_error.retry_at + timedelta(seconds=1)
+            assert graph.call_count == 2

@@ -29,7 +29,7 @@ from textual.widgets._tooltip import Tooltip
 
 from pr_watcher.app import PRTable, PRWatcherApp, RESTART_AFTER_UPDATE
 from pr_watcher.config import Config, SETTINGS_FILE
-from pr_watcher.github import RateLimitError
+from pr_watcher.github import FetchState, RateLimitError
 
 
 def _iso(delta: timedelta) -> str:
@@ -200,6 +200,106 @@ async def test_status_column_shows_checks_and_updates_on_refresh():
             status = table.get_cell(app._row_key(prs[1]), column)
             assert status.plain == "● ⏳ Review Needed"
             assert status.spans[0].style == "green"
+
+
+@pytest.mark.parametrize(("initial_count", "recovered_count", "unread"), [
+    (None, 7, False),
+    (1, 1, False),
+    (1, 3, True),
+])
+async def test_rest_fallback_metadata_and_comment_baseline_recover(
+    initial_count: int | None, recovered_count: int, unread: bool,
+) -> None:
+    initial = deepcopy(MOCK_PRS[0])
+    initial["totalCommentsCount"] = initial_count
+    fallback = {
+        **deepcopy(initial),
+        "_rest_fallback": True,
+        "reviewDecision": None,
+        "totalCommentsCount": None,
+    }
+    fallback.pop("commits")
+    fallback.pop("latestReviews")
+    if initial_count is None:
+        initial = deepcopy(fallback)
+    recovered = {**deepcopy(MOCK_PRS[0]), "totalCommentsCount": recovered_count}
+    app = PRWatcherApp(Config(org="Equinor"))
+    identity = app._pr_identity(initial)
+    with patch(
+        "pr_watcher.github.fetch_all_team_prs",
+        side_effect=[[initial], [fallback], [recovered], [fallback], [recovered]],
+    ) as fetch:
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            app.action_refresh()
+            await pilot.pause(0.5)
+
+            table = app.query_one("#pr-table", PRTable)
+            key = app._row_key(fallback)
+            assert table.get_cell(key, app._col_keys["review"]).plain == "  ❔ Unknown"
+            assert table.get_cell(key, app._col_keys["reviewers"]) == (
+                "bob, team:ecm-wo-preparation (partial)"
+            )
+            assert table.get_cell(key, app._col_keys["comments"]) == "?"
+            assert "REST fallback (limited metadata)" in _status_text(app)
+            assert "GraphQL in" not in _status_text(app)
+            assert app._rate_limit_until is None
+            assert "Refresh in" in _status_text(app)
+            assert (identity in app._comment_counts) is (initial_count is not None)
+            assert fetch.call_args.kwargs["fetch_state"] is app._fetch_state
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+            expected = f"{recovered_count}{'!' if unread else ''}"
+            assert table.get_cell(key, app._col_keys["comments"]) == expected
+            assert (identity in app._unread_comment_updates) is unread
+            assert table.get_cell(key, app._col_keys["review"]).plain == "● ✅ Approved"
+            assert "REST fallback" not in _status_text(app)
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+            assert (identity in app._unread_comment_updates) is unread
+            with patch("pr_watcher.app.open_url") as open_pr:
+                app.action_open_pr()
+            open_pr.assert_called_once_with(fallback["url"])
+            assert identity not in app._unread_comment_updates
+            assert table.get_cell(key, app._col_keys["comments"]) == "?"
+
+            app.action_refresh()
+            await pilot.pause(0.5)
+            assert table.get_cell(key, app._col_keys["comments"]) == str(recovered_count)
+            assert identity not in app._unread_comment_updates
+
+
+async def test_rest_fallback_countdown_updates_on_tick_and_clears() -> None:
+    app = PRWatcherApp(Config(org="Equinor"))
+    retry_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    app._fetch_state.graphql_retry_at = retry_at
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=[]) as fetch:
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _run_with_mock_prs(app, pilot)
+            assert "REST fallback (limited metadata)" in _status_text(app)
+            assert "0 open PRs" in _status_text(app)
+            assert app.query_one("#pr-table").display
+            assert app._rate_limit_until is None
+
+            app._next_refresh = None
+            with patch("pr_watcher.app.datetime") as clock:
+                for remaining, expected in [
+                    (90.2, "GraphQL in 91s"),
+                    (30, "GraphQL in 30s"),
+                    (0, "GraphQL retry due"),
+                    (-1, "GraphQL retry due"),
+                ]:
+                    clock.now.return_value = retry_at - timedelta(seconds=remaining)
+                    app._tick()
+                    assert expected in _status_text(app)
+
+            app._fetch_state.graphql_retry_at = None
+            app._update_status_bar()
+            assert "REST fallback" not in _status_text(app)
+            assert "GraphQL" not in _status_text(app)
+            fetch.assert_called_once()
 
 
 async def test_tick_during_shutdown_does_not_update_or_refresh():
@@ -568,7 +668,16 @@ async def test_comment_increase_marked_until_row_selected():
 async def test_failed_refresh_keeps_rows_and_recovery_does_not_ring_bell():
     cached_inputs = []
 
-    def fetch(_org, _team_slug, cached_prs, failed_repos, _ignore_repos):
+    def fetch(
+        _org: str,
+        _team_slug: str,
+        cached_prs: list[dict],
+        failed_repos: list[str],
+        _ignore_repos: list[str],
+        *,
+        fetch_state: FetchState,
+    ) -> list[dict]:
+        assert fetch_state is app._fetch_state
         cached_inputs.append(deepcopy(cached_prs))
         if len(cached_inputs) == 2:
             failed_repos.extend(["Equinor/repo-a", "Equinor/repo-b"])

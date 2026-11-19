@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from math import ceil
 from pathlib import Path
 from time import monotonic
 from typing import Optional
@@ -136,6 +137,8 @@ def format_age(created_at: str) -> str:
 def format_review_status(pr: dict) -> str:
     if pr.get("isDraft"):
         return "📝 Draft"
+    if pr.get("_rest_fallback"):
+        return "❔ Unknown"
     decision = pr.get("reviewDecision") or ""
     return {
         "APPROVED": "✅ Approved",
@@ -161,6 +164,8 @@ def format_pr_status(pr: dict) -> Text:
 def pr_priority(pr: dict) -> int:
     """Rank for the priority sort; lower values are shown first."""
     if pr.get("isDraft"):
+        return 5
+    if pr.get("_rest_fallback"):
         return 4
     decision = pr.get("reviewDecision")
     if decision == "APPROVED":
@@ -207,10 +212,13 @@ def reviewer_names(pr: dict) -> set[str]:
 
 def format_reviewers(pr: dict) -> str:
     """Combine requested users/teams and submitted reviewers without duplicates."""
-    return ", ".join(sorted(reviewer_names(pr), key=str.casefold)) or "—"
+    names = ", ".join(sorted(reviewer_names(pr), key=str.casefold))
+    if pr.get("_rest_fallback"):
+        return f"{names} (partial)" if names else "Unknown"
+    return names or "—"
 
 
-def comment_count(pr: dict) -> int:
+def comment_count(pr: dict) -> Optional[int]:
     return pr.get("totalCommentsCount", 0)
 
 
@@ -363,6 +371,7 @@ class PRWatcherApp(App):
         self._next_refresh: Optional[datetime] = None
         self._rate_limit_until: Optional[datetime] = None
         self._rate_limit_attempts: int = 0
+        self._fetch_state = github.FetchState()
         self._col_keys: dict[str, object] = {}  # populated in on_mount
         self._last_opened_url: Optional[str] = None
         self._last_opened_at: Optional[float] = None
@@ -414,7 +423,7 @@ class PRWatcherApp(App):
             w["review"] = max(w["review"], cell_len(format_pr_status(pr).plain))
             w["age"]    = max(w["age"],    len(self._age_display(pr)))
             w["updated"] = max(w["updated"], len(format_age(pr.get("updatedAt", ""))))
-            w["comments"] = max(w["comments"], len(str(comment_count(pr))) + 1)
+            w["comments"] = max(w["comments"], len(self._comment_display(pr)))
             w["labels"] = max(w["labels"], len(format_labels(pr.get("labels", []))))
 
         # Apply caps to all columns
@@ -584,6 +593,7 @@ class PRWatcherApp(App):
             list(self._prs),
             failed_repos,
             self.config.ignore_repos,
+            fetch_state=self._fetch_state,
         )
         return prs, len(failed_repos)
 
@@ -633,21 +643,27 @@ class PRWatcherApp(App):
             new_prs, failed_repo_count = event.worker.result
             new_identities = {self._pr_identity(pr) for pr in new_prs}
             new_comment_counts = {
-                self._pr_identity(pr): comment_count(pr) for pr in new_prs
+                self._pr_identity(pr): count for pr in new_prs
+                if (count := comment_count(pr)) is not None
             }
 
             # Ring bell for any PRs that weren't in the previous fetch
             if self.config.bell and self._known_prs and (new_identities - self._known_prs):
                 self.bell()
 
-            self._unread_comment_updates.intersection_update(new_comment_counts)
+            self._unread_comment_updates.intersection_update(new_identities)
             self._unread_comment_updates.update(
                 identity
                 for identity, count in new_comment_counts.items()
                 if identity in self._comment_counts
                 and count > self._comment_counts[identity]
             )
-            self._comment_counts = new_comment_counts
+            # Keep the last known count while lightweight REST omits it.
+            self._comment_counts = {
+                identity: count for identity, count in self._comment_counts.items()
+                if identity in new_identities
+            }
+            self._comment_counts.update(new_comment_counts)
             self._known_prs = new_identities
             self._prs = order_prs(new_prs, self.config.sort)
             self._error = None
@@ -746,8 +762,11 @@ class PRWatcherApp(App):
         return next((pr for pr in self._prs if self._row_key(pr) == key), None)
 
     def _comment_display(self, pr: dict) -> str:
+        count = comment_count(pr)
+        if count is None:
+            return "?"
         suffix = "!" if self._pr_identity(pr) in self._unread_comment_updates else ""
-        return f"{comment_count(pr)}{suffix}"
+        return f"{count}{suffix}"
 
     def _acknowledge_comment_update(self, pr: dict) -> None:
         identity = self._pr_identity(pr)
@@ -758,7 +777,7 @@ class PRWatcherApp(App):
         table.update_cell(
             self._row_key(pr),
             self._col_keys["comments"],
-            str(comment_count(pr)),
+            self._comment_display(pr),
         )
 
     def _is_ignored(self, pr: dict) -> bool:
@@ -847,6 +866,18 @@ class PRWatcherApp(App):
                 f"Rate limited - refresh paused until "
                 f"{self._rate_limit_until.astimezone():%H:%M:%S} ({secs}s)"
             )
+
+        graphql_retry_at = self._fetch_state.graphql_retry_at
+        if (
+            graphql_retry_at is not None
+            or any(pr.get("_rest_fallback") for pr in self._prs)
+        ):
+            parts.append("REST fallback (limited metadata)")
+            if graphql_retry_at is not None:
+                secs = max(
+                    0, ceil((graphql_retry_at - datetime.now(timezone.utc)).total_seconds())
+                )
+                parts.append(f"GraphQL in {secs}s" if secs else "GraphQL retry due")
 
         if self._show_ignored:
             n = len(self._visible_prs)
