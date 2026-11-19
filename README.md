@@ -118,7 +118,9 @@ Review states use equal-width emoji so their labels align: ✅ Approved,
 When GitHub exhausts the GraphQL primary quota, the app switches unfinished
 repositories to a lightweight REST fallback and keeps refreshing through REST
 until the GraphQL reset time. It then automatically tries GraphQL again. The
-status bar shows **REST fallback (limited metadata)**.
+status bar shows **REST fallback (limited metadata)** and a **GraphQL in Ns**
+countdown that updates every second. Once the reset time passes, it shows
+**GraphQL retry due** until the next refresh tries GraphQL again.
 
 REST still updates PR titles, authors, labels, timestamps, draft state, links,
 and requested reviewers/teams. Review status shows **Unknown** (except drafts),

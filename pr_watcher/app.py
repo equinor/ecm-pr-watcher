@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from math import ceil
 from pathlib import Path
 from time import monotonic
 from typing import Optional
@@ -866,11 +867,17 @@ class PRWatcherApp(App):
                 f"{self._rate_limit_until.astimezone():%H:%M:%S} ({secs}s)"
             )
 
+        graphql_retry_at = self._fetch_state.graphql_retry_at
         if (
-            self._fetch_state.graphql_retry_at is not None
+            graphql_retry_at is not None
             or any(pr.get("_rest_fallback") for pr in self._prs)
         ):
             parts.append("REST fallback (limited metadata)")
+            if graphql_retry_at is not None:
+                secs = max(
+                    0, ceil((graphql_retry_at - datetime.now(timezone.utc)).total_seconds())
+                )
+                parts.append(f"GraphQL in {secs}s" if secs else "GraphQL retry due")
 
         if self._show_ignored:
             n = len(self._visible_prs)

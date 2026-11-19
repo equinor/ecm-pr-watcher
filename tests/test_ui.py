@@ -242,6 +242,7 @@ async def test_rest_fallback_metadata_and_comment_baseline_recover(
             )
             assert table.get_cell(key, app._col_keys["comments"]) == "?"
             assert "REST fallback (limited metadata)" in _status_text(app)
+            assert "GraphQL in" not in _status_text(app)
             assert app._rate_limit_until is None
             assert "Refresh in" in _status_text(app)
             assert (identity in app._comment_counts) is (initial_count is not None)
@@ -270,16 +271,35 @@ async def test_rest_fallback_metadata_and_comment_baseline_recover(
             assert identity not in app._unread_comment_updates
 
 
-async def test_empty_rest_fallback_still_reports_mode() -> None:
+async def test_rest_fallback_countdown_updates_on_tick_and_clears() -> None:
     app = PRWatcherApp(Config(org="Equinor"))
-    app._fetch_state.graphql_retry_at = datetime.now(timezone.utc) + timedelta(hours=1)
-    with patch("pr_watcher.github.fetch_all_team_prs", return_value=[]):
+    retry_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    app._fetch_state.graphql_retry_at = retry_at
+    with patch("pr_watcher.github.fetch_all_team_prs", return_value=[]) as fetch:
         async with app.run_test(size=(220, 40)) as pilot:
             await _run_with_mock_prs(app, pilot)
             assert "REST fallback (limited metadata)" in _status_text(app)
             assert "0 open PRs" in _status_text(app)
             assert app.query_one("#pr-table").display
             assert app._rate_limit_until is None
+
+            app._next_refresh = None
+            with patch("pr_watcher.app.datetime") as clock:
+                for remaining, expected in [
+                    (90.2, "GraphQL in 91s"),
+                    (30, "GraphQL in 30s"),
+                    (0, "GraphQL retry due"),
+                    (-1, "GraphQL retry due"),
+                ]:
+                    clock.now.return_value = retry_at - timedelta(seconds=remaining)
+                    app._tick()
+                    assert expected in _status_text(app)
+
+            app._fetch_state.graphql_retry_at = None
+            app._update_status_bar()
+            assert "REST fallback" not in _status_text(app)
+            assert "GraphQL" not in _status_text(app)
+            fetch.assert_called_once()
 
 
 async def test_tick_during_shutdown_does_not_update_or_refresh():
