@@ -252,6 +252,7 @@ def fetch_prs_for_repo(repo: str) -> list[dict]:
 def fetch_prs_for_repo_rest(repo: str) -> list[dict]:
     """Return open PRs without per-PR requests for review/check/comment details."""
     prs: list[dict] = []
+    seen_numbers: set[int] = set()
     page = 1
     while True:
         items = _api_json(
@@ -261,6 +262,9 @@ def fetch_prs_for_repo_rest(repo: str) -> list[dict]:
         if not isinstance(items, list):
             raise RuntimeError(f"{repo}: Unexpected REST pull request response")
         for pr in items:
+            if pr["number"] in seen_numbers:
+                continue
+            seen_numbers.add(pr["number"])
             requests = [
                 {"requestedReviewer": {"login": reviewer["login"]}}
                 for reviewer in pr.get("requested_reviewers") or []

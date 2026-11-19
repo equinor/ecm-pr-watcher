@@ -280,6 +280,18 @@ class TestFetchPrsForRepoRest:
         assert api.call_count == 2
         assert api.call_args.args[0].endswith("&page=2")
 
+    def test_deduplicates_overlapping_pages_preserving_order(self) -> None:
+        with patch(
+            "pr_watcher.github._api_json",
+            side_effect=[
+                [_rest_pr(number) for number in range(200, 100, -1)],
+                [_rest_pr(101), _rest_pr(100)],
+            ],
+        ) as api:
+            result = github.fetch_prs_for_repo_rest("acme/repo")
+        assert [pr["number"] for pr in result] == list(range(200, 99, -1))
+        assert api.call_count == 2
+
     def test_invalid_page_does_not_return_partial_results(self) -> None:
         with patch(
             "pr_watcher.github._api_json",
